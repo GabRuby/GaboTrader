@@ -1788,7 +1788,7 @@ with top_left:
     st.markdown(
         f"""
 <div class="topbar">
-    <span class="brand">QUANTLAB IDE</span>
+    <span class="brand">GABO trader LAB</span>
     <span class="badge">📄 {selected_script}</span>
     <span class="badge">📊 {asset}</span>
 </div>
