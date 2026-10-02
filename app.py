@@ -279,6 +279,7 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+from qc_lab.core import strategy_parser
 from qc_lab.core.compat import contrato_heredado
 from qc_lab.core.datafeed import available_tickers
 from qc_lab.core.runner import ConfigEjecucion, ejecutar_estrategia
@@ -329,6 +330,17 @@ MAX_COMPARATIVES = 2
 # en el dialecto vectorial; en el dialecto Lean manda el modelo de broker que
 # declare la propia estrategia. Se conserva aquí como valor por defecto explicito.
 COMMISSION_RATE = 0.0005
+
+# Valores por defecto de las medias moviles. Solo se usan para lo que la app ya
+# mostraba antes de que los parametros fueran dinamicos (la insignia "SMA x/y" del
+# topbar y los prompts de IA): NO son controles y no llegan al motor.
+DEFAULT_FAST_MA = 10
+DEFAULT_SLOW_MA = 50
+
+# G.3.5: overrides que produce la UI dinamica de parametros del sidebar en ESTE run.
+# El motor los recibe por `ConfigEjecucion.parametros`, que ya sabe inyectarlos en el
+# codigo (`engine.aplicar_parametros`) o pasarlos a `run_strategy` (dialecto vector).
+PARAMETROS_ACTIVOS: dict = {}
 
 # Activos que el usuario puede elegir. El universo lo define el data feed de qc_lab,
 # de modo que la lista se deriva de el y no de un literal que se pueda quedar viejo.
@@ -467,13 +479,22 @@ REFERENCE_SNAPSHOT = {
 # corrida: cualquier consumidor nuevo debe llamar a una de las dos.
 
 
-def _config_lab(ticker, fast_ma, slow_ma, capital):
+def _sello_parametros() -> tuple:
+    """Huella estable de los overrides activos, para invalidar las cachés.
+
+    Sin esto, mover un parametro dinamico no entraria en la clave y el backtest
+    devolveria el resultado cacheado del valor anterior.
+    """
+    return tuple(sorted((k, round(float(v), 6)) for k, v in PARAMETROS_ACTIVOS.items()))
+
+
+def _config_lab(ticker, capital):
     """Configuración de la corrida que se envía al motor de qc_lab."""
     return ConfigEjecucion(
         simbolo=str(ticker).upper(),
         capital=float(capital),
         comision=COMMISSION_RATE,
-        parametros={"fast_ma": int(fast_ma), "slow_ma": int(slow_ma)},
+        parametros=dict(PARAMETROS_ACTIVOS),
     )
 
 
@@ -581,59 +602,59 @@ def _legacy_finalize(df, capital, source, ticker, fast_ma, slow_ma):
     return df, metrics
 
 
-def run_strategy_backtest(script, ticker, fast_ma, slow_ma, capital=100000):
+def run_strategy_backtest(script, ticker, capital=100000):
     """Ejecuta la Estrategia Principal en el motor de qc_lab y devuelve (df, metrics).
 
     Acepta el archivo y no un simple ticker: el motor es el unico que sabe si la
     estrategia es una clase Lean o una funcion `run_strategy`, y ademas decide fechas,
     capital y universo a partir de lo que la propia estrategia declare.
     """
-    cfg = _config_lab(ticker, fast_ma, slow_ma, capital)
+    cfg = _config_lab(ticker, capital)
     resultado = ejecutar_estrategia(BASE_DIR / script, config=cfg)
     return _contrato_de_lab(resultado, ticker, capital, cfg.parametros, script)
 
 
-def run_source_backtest(source_code, ticker, fast_ma, slow_ma, capital, etiqueta="La estrategia"):
+def run_source_backtest(source_code, ticker, capital, etiqueta="La estrategia"):
     """Ejecuta código fuente de una estrategia en el motor de qc_lab y devuelve (df, metrics).
 
     El mismo tratamiento recibe un `.py` de la carpeta que el borrador que la IA
     acaba de generar en memoria: los dos entran por `ejecutar_estrategia`, asi que
     una comparativa se comporta exactamente igual que la Estrategia Principal.
     """
-    cfg = _config_lab(ticker, fast_ma, slow_ma, capital)
+    cfg = _config_lab(ticker, capital)
     cfg.etiqueta = etiqueta
     resultado = ejecutar_estrategia(fuente=source_code, config=cfg)
     return _contrato_de_lab(resultado, ticker, capital, cfg.parametros, etiqueta)
 
 
-def run_draft_backtest(source_code, ticker, fast_ma, slow_ma, capital):
+def run_draft_backtest(source_code, ticker, capital):
     """Ejecuta la estrategia del borrador y devuelve (df, metrics) con las mismas métricas."""
-    return run_source_backtest(source_code, ticker, fast_ma, slow_ma, capital, "El borrador")
+    return run_source_backtest(source_code, ticker, capital, "El borrador")
 
 
-def run_comparative_backtest(script, ticker, fast_ma, slow_ma, capital):
+def run_comparative_backtest(script, ticker, capital):
     """Ejecuta una estrategia comparativa desde su archivo y devuelve (df, metrics).
 
     Los errores se capturan aquí y se devuelven como `error` para que una estrategia
     rota no tumbe la comparación completa.
     """
     try:
-        df, metrics = run_strategy_backtest(script, ticker, fast_ma, slow_ma, capital)
+        df, metrics = run_strategy_backtest(script, ticker, capital)
     except Exception as exc:
         return None, {"error": str(exc), "script": script}
     return df, metrics
 
 
-def get_comparative_results(scripts, ticker, fast_ma, slow_ma, capital) -> dict:
+def get_comparative_results(scripts, ticker, capital) -> dict:
     """Results de las comparativas seleccionadas, cacheados por script + parámetros."""
     cache = st.session_state.get(COMPARE_CACHE_KEY) or {}
     wanted = [s for s in scripts if s in ALL_STRATEGIES]
     out = {}
     for script in wanted:
-        stamp = (ticker, int(fast_ma), int(slow_ma), float(capital))
+        stamp = (ticker, _sello_parametros(), float(capital))
         cached = cache.get(script)
         if not cached or cached.get("params") != stamp:
-            df, metrics = run_comparative_backtest(script, ticker, fast_ma, slow_ma, capital)
+            df, metrics = run_comparative_backtest(script, ticker, capital)
             cached = {"params": stamp, "df": df, "metrics": metrics}
             cache[script] = cached
         out[script] = cached
@@ -645,7 +666,7 @@ RESULT_KEY = "backtest_result"
 PARAMS_KEY = "backtest_params"
 
 
-def get_backtest_result(ticker, fast_ma, slow_ma, capital, force=False):
+def get_backtest_result(ticker, capital, force=False):
     """Resultado del backtest de la Estrategia Principal, cacheado por parámetros.
 
     La Estrategia Principal se lee del estado de sesión y se ejecuta en `qc_lab` igual
@@ -654,14 +675,14 @@ def get_backtest_result(ticker, fast_ma, slow_ma, capital, force=False):
     operativo en lugar de dejar la app a medias.
     """
     script = st.session_state.get(PRINCIPAL_KEY) or (py_files[0] if py_files else "")
-    params = (script, ticker, int(fast_ma), int(slow_ma), float(capital))
+    params = (script, ticker, _sello_parametros(), float(capital))
     cached = st.session_state.get(RESULT_KEY)
 
     if not force and cached is not None and st.session_state.get(PARAMS_KEY) == params:
         return cached["df"], cached["metrics"]
 
     try:
-        df, metrics = run_strategy_backtest(script, ticker, fast_ma, slow_ma, capital)
+        df, metrics = run_strategy_backtest(script, ticker, capital)
     except Exception as exc:
         df = pd.DataFrame({"Equity": [float(capital)], "Benchmark": [float(capital)],
                            "Drawdown": [0.0], "Position": [0.0]},
@@ -1118,7 +1139,7 @@ def render_draft_area(base_values: dict, ticker, fast_ma, slow_ma, capital):
                 with st.spinner("🧪 Ejecutando el backtest del borrador..."):
                     try:
                         draft_df, draft_metrics = run_draft_backtest(
-                            codigo_borrador, ticker, fast_ma, slow_ma, capital
+                            codigo_borrador, ticker, capital
                         )
                     except ValueError as exc:
                         for key in (DRAFT_RESULT_KEY, DRAFT_METRICS_KEY, DRAFT_EQUITY_KEY):
@@ -1483,22 +1504,11 @@ def render_ai_backtest_panel(values, df_res, ticker, fast_ma, slow_ma, capital, 
 # -----------------------------------------------------------------------------
 # GESTOR DE ESTRATEGIAS: PRINCIPAL ⭐ vs COMPARATIVAS
 # -----------------------------------------------------------------------------
-def render_strategy_manager(available: list[str], principal: str) -> str:
-    """Dibuja el gestor del sidebar y devuelve la Estrategia Principal vigente.
-
-    La ⭐ fija la principal (carga su código en el editor y gobierna Editar/IA/Interpretar).
-    Los checkboxes marcan hasta MAX_COMPARATIVAS estrategias para contrastarlas.
-    """
-    selected = st.session_state.get(COMPARE_KEY, [])
-    pending_star = None
-    pending_checks = {}
-
-    st.markdown(
-        '<div class="panel-title" style="margin:2px 0 4px">🧭 Principal vs Comparativas</div>',
-        unsafe_allow_html=True,
-    )
-
-    # --- Estrategia Principal ---
+# El gestor se pinta en dos grupos del sidebar (ESTRATEGIAS y ESTRATEGIAS A COMPARAR),
+# pero los clics se siguen resolviendo TODOS juntos al final del run: es lo que evita
+# que un widget de este run choque con los valores que aun guarda la sesión.
+def render_principal_panel(principal: str) -> None:
+    """Muestra la Estrategia Principal vigente (grupo ESTRATEGIAS)."""
     st.markdown(
         f'<div class="strategy-row principal"><span class="star">⭐</span>'
         f'<span class="strategy-name">{principal}</span>'
@@ -1506,10 +1516,19 @@ def render_strategy_manager(available: list[str], principal: str) -> str:
         unsafe_allow_html=True,
     )
 
+
+def render_comparativas_panel(available: list[str], principal: str, pending: dict) -> bool:
+    """Pinta las comparativas y deja los clics en `pending`.
+
+    Devuelve False cuando no hay ninguna estrategia mas que comparar, que es el caso en
+    que antes el gestor retornaba sin llegar a tocar `COMPARE_KEY`.
+    """
+    selected = st.session_state.get(COMPARE_KEY, [])
+
     others = [script for script in available if script != principal]
     if not others:
         st.caption("No hay otras estrategias para comparar.")
-        return principal
+        return False
 
     st.markdown(
         '<div class="strategy-subtitle">Estrategias a comparar '
@@ -1527,7 +1546,7 @@ def render_strategy_manager(available: list[str], principal: str) -> str:
                 help=f"Convertir `{script}` en Estrategia Principal",
                 use_container_width=True,
             ):
-                pending_star = script
+                pending["star"] = script
         with check_col:
             checked = st.checkbox(
                 script,
@@ -1535,10 +1554,23 @@ def render_strategy_manager(available: list[str], principal: str) -> str:
                 key=f"cmp_{script}",
                 help=f"Comparar `{script}` contra la principal",
             )
-            pending_checks[script] = checked
+            pending["checks"][script] = checked
+    return True
 
-    # Los clics se aplican después de pintar la lista: así los widgets de este run
-    # no chocan con los valores que ainda guardan la sesión.
+
+def aplicar_gestor_pendientes(available: list[str], principal: str, pending: dict, hay_comparativas: bool) -> str:
+    """Aplica los clics de ambos grupos y devuelve la Estrategia Principal vigente.
+
+    Mismas reglas que antes: la ⭐ manda sobre el recorte, solo caben MAX_COMPARATIVES y
+    el aviso de descarte se muestra una sola vez.
+    """
+    if not hay_comparativas:
+        return principal
+
+    pending_star = pending["star"]
+    pending_checks = pending["checks"]
+    selected = st.session_state.get(COMPARE_KEY, [])
+
     if pending_star is not None:
         set_principal_strategy(pending_star, available)
         st.rerun()
@@ -1567,10 +1599,58 @@ def render_strategy_manager(available: list[str], principal: str) -> str:
 
 
 # -----------------------------------------------------------------------------
+# PARÁMETROS DINÁMICOS DE LA ESTRATEGIA
+# -----------------------------------------------------------------------------
+# No hay una lista fija de parámetros: los controles se generan con lo que
+# `strategy_parser` detecta en el `.py` que se ha elegido como Principal, de modo que
+# cambiar de estrategia cambia los controles sin tocar nada a mano.
+
+def _cae_en_rejilla(valor: float, minimo: float, paso: float) -> bool:
+    """¿El valor declarado cae justo en un escalón del rango sugerido?"""
+    if paso <= 0:
+        return True
+    posiciones = (float(valor) - float(minimo)) / float(paso)
+    return abs(posiciones - round(posiciones)) < 1e-9
+
+
+def control_parametro(prm, prefijo: str) -> float:
+    """Un control para un parámetro detectado, con el rango y el paso que sugiere el parser.
+
+    Dos ajustes sobre lo que devuelve `sugerir_rango`, que es una heurística por nombre:
+
+    * `Parametro.es_entero` manda sobre el paso y sobre el tipo de salida. El parser
+      guarda `valor` ya convertido a float, así que la comprobación de entero de
+      `sugerir_rango` nunca se cumple y propone pasos decimales (0.6 para `fast_ma=12`).
+      Ni el paso ni el valor pueden quedar decimales: `rolling(window=12.0)` también
+      revienta, así que un parámetro entero se devuelve como `int`.
+    * Si el valor de la estrategia no cae en la rejilla del paso (p. ej.
+      `pct_capital_escalon` = 0.3 con paso 1.0) se usa `number_input` con los mismos
+      límites, porque un slider redondearía el valor al primer clic.
+    """
+    minimo, maximo, paso = (float(v) for v in strategy_parser.sugerir_rango(prm.nombre, prm.valor))
+    valor = float(prm.valor)
+
+    if prm.es_entero:
+        paso = float(max(1, round(paso)))
+        minimo = float(round(minimo))
+        maximo = float(max(round(maximo), round(valor) + paso))
+        valor = float(round(valor))
+
+    clave = f"{prefijo}{prm.clave}"
+    if maximo > minimo and _cae_en_rejilla(valor, minimo, paso):
+        elegido = st.slider(prm.nombre, min_value=minimo, max_value=maximo, value=valor,
+                             step=paso, key=clave)
+    else:
+        elegido = st.number_input(prm.nombre, min_value=minimo, max_value=maximo, value=valor,
+                                  step=paso, key=clave)
+    return int(round(elegido)) if prm.es_entero else float(elegido)
+
+
+# -----------------------------------------------------------------------------
 # SIDEBAR
 # -----------------------------------------------------------------------------
-# Grupos del panel izquierdo. En G.3.3 solo se crea la estructura: los controles
-# actuales siguen renderizandose igual y se moveran a su grupo en la fase siguiente.
+# Los seis grupos aprobados en G.3.3; en G.3.5 cada uno recibe los controles que ya
+# existian, sin duplicar ninguno.
 SIDEBAR_GROUPS = (
     "📁 ESTRATEGIAS",
     "⚖️ ESTRATEGIAS A COMPARAR",
@@ -1590,47 +1670,80 @@ with st.sidebar:
     )
     st.caption(f"LEAN Engine: {ENGINE_VERSION}")
 
-    # Los seis grupos contraíbles, cada uno con su encabezado (icono + titulo) y
-    # su indicador de contraccion a la derecha.
-    for grupo in SIDEBAR_GROUPS:
-        with st.expander(grupo, expanded=False, key=f"grp_{grupo}"):
-            pass
+    # --- 1. ESTRATEGIAS -------------------------------------------------
+    with st.expander(SIDEBAR_GROUPS[0], expanded=True, key="grp_estrategias"):
+        if st.button("📂 Abrir Estrategia", use_container_width=True, key="btn_open_strategy"):
+            modal_abrir_estrategia()
 
-    st.markdown("---")
-    st.caption("📁 PROYECTOS / ESTRATEGIAS (.py)")
-    if st.button("📂 Abrir Estrategia", use_container_width=True, key="btn_open_strategy"):
-        modal_abrir_estrategia()
+        principal_script = st.session_state[PRINCIPAL_KEY]
+        if st.session_state.get("script_selector") not in ALL_STRATEGIES:
+            st.session_state["script_selector"] = principal_script
 
-    principal_script = st.session_state[PRINCIPAL_KEY]
-    if st.session_state.get("script_selector") not in ALL_STRATEGIES:
-        st.session_state["script_selector"] = principal_script
+        render_principal_panel(principal_script)
 
-    selected_script = render_strategy_manager(ALL_STRATEGIES, principal_script)
+    # --- 2. ESTRATEGIAS A COMPARAR --------------------------------------
+    pending_gestor = {"star": None, "checks": {}}
+    with st.expander(SIDEBAR_GROUPS[1], expanded=False, key="grp_comparar"):
+        hay_comparativas = render_comparativas_panel(
+            ALL_STRATEGIES, principal_script, pending_gestor
+        )
+
+    # Los clics de los dos grupos se resuelven juntos, igual que antes.
+    selected_script = aplicar_gestor_pendientes(
+        ALL_STRATEGIES, principal_script, pending_gestor, hay_comparativas
+    )
     st.session_state["script_nombre"] = selected_script
 
     flash_msg = st.session_state.pop("flash_msg", None)
     if flash_msg:
         st.toast(flash_msg, icon="✅")
 
-    st.caption("⚙️️ PARÁMETROS")
-    asset = st.selectbox("Activo / Ticker", ASSETS, index=DEFAULT_ASSET_INDEX)
-    fast_period = st.slider("SMA Rápida", min_value=5, max_value=50, value=10)
-    slow_period = st.slider("SMA Lenta", min_value=20, max_value=200, value=50)
-    initial_cap = st.number_input("Capital Inicial ($)", value=100000, step=10000)
+    # --- 3. REGLAS COMUNES ----------------------------------------------
+    with st.expander(SIDEBAR_GROUPS[2], expanded=True, key="grp_reglas"):
+        asset = st.selectbox("Activo / Ticker", ASSETS, index=DEFAULT_ASSET_INDEX)
+        initial_cap = st.number_input("Capital Inicial ($)", value=100000, step=10000)
 
-    st.caption("📊 SERIES VISIBLES")
-    show_equity = st.checkbox("Strategy Equity", value=True)
-    show_benchmark = st.checkbox("Benchmark Comparison", value=True)
-    show_drawdown = st.checkbox("Drawdown", value=True)
+    # --- 4. PARÁMETROS DE LA ESTRATEGIA ---------------------------------
+    # Se reconstruyen en cada run: el conjunto depende del archivo elegido como Principal.
+    PARAMETROS_ACTIVOS.clear()
+    with st.expander(SIDEBAR_GROUPS[3], expanded=True, key="grp_parametros"):
+        info_estrategia = strategy_parser.analizar_archivo(BASE_DIR / selected_script)
+        if info_estrategia.error:
+            st.caption(f"⚠️ {info_estrategia.error}")
+        elif not info_estrategia.parametros:
+            st.caption("Este archivo no declara parámetros ajustables.")
+        else:
+            categorias = info_estrategia.parametros_por_categoria()
+            con_categorias = len(categorias) > 1
+            for categoria, grupo in categorias.items():
+                if con_categorias:
+                    st.caption(categoria)
+                for prm in grupo:
+                    PARAMETROS_ACTIVOS[prm.clave] = control_parametro(
+                        prm, f"param_{selected_script}_"
+                    )
 
-    st.markdown("---")
-    st.info("💡 **Backtest Status:** Likely Not Overfit\n\nParameters: 2 Determined")
+    # Estas dos variables ya no son controles: las usan el topbar y los prompts de IA
+    # para mostrar el par de medias. Cuando la estrategia no las declara, se muestran
+    # los valores por defecto de siempre.
+    fast_period = int(PARAMETROS_ACTIVOS.get("fast_ma", DEFAULT_FAST_MA))
+    slow_period = int(PARAMETROS_ACTIVOS.get("slow_ma", DEFAULT_SLOW_MA))
+
+    # --- 5. OPCIONES DE VISUALIZACIÓN -----------------------------------
+    with st.expander(SIDEBAR_GROUPS[4], expanded=False, key="grp_visualizacion"):
+        show_equity = st.checkbox("Strategy Equity", value=True)
+        show_benchmark = st.checkbox("Benchmark Comparison", value=True)
+        show_drawdown = st.checkbox("Drawdown", value=True)
+
+    # --- 6. ESTADO DEL BACKTEST -----------------------------------------
+    with st.expander(SIDEBAR_GROUPS[5], expanded=True, key="grp_estado"):
+        st.info("💡 **Backtest Status:** Likely Not Overfit\n\nParameters: 2 Determined")
 
 # -----------------------------------------------------------------------------
 # PROCESAMIENTO DE METRICAS
 # -----------------------------------------------------------------------------
 force_run = st.session_state.pop("force_run", False)
-df_res, metrics = get_backtest_result(asset, fast_period, slow_period, initial_cap, force=force_run)
+df_res, metrics = get_backtest_result(asset, initial_cap, force=force_run)
 
 # El motor de qc_lab produce datos reales siempre, así que el snapshot de referencia
 # solo entra cuando la Estrategia Principal no se ha podido ejecutar.
@@ -1992,7 +2105,7 @@ with col_right:
     # Las comparativas marcadas en el sidebar se ejecutan con los mismos parámetros.
     compare_scripts = [s for s in st.session_state.get(COMPARE_KEY, []) if s != selected_script]
     compare_results = get_comparative_results(
-        compare_scripts, asset, fast_period, slow_period, initial_cap
+        compare_scripts, asset, initial_cap
     ) if compare_scripts else {}
 
     comparative_curves = []
