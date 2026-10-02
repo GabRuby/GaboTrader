@@ -47,6 +47,15 @@ _NO_AJUSTABLE = {
 }
 
 
+# Dialectos de estrategia que el motor sabe ejecutar.
+#   LEAN     -> clase que hereda de QCAlgorithm (el nativo de qc_lab).
+#   VECTOR   -> funcion `run_strategy(data, ...) -> DataFrame` (heredado de app.py).
+#   NINGUNO  -> el archivo no expone ninguna de las dos formas.
+DIALECTO_LEAN = "lean"
+DIALECTO_VECTOR = "vector"
+DIALECTO_NINGUNO = "ninguno"
+
+
 @dataclass
 class Parametro:
     """Un numero found en el codigo que el dashboard puede convertir en slider."""
@@ -91,6 +100,9 @@ class EstrategiaInfo:
     lineas: int = 0
     valido: bool = False
     error: str = ""
+    # Que forma expone el archivo: `lean`, `vector` o `ninguno`. Determina que
+    # ejecutor usa el motor y por tanto como llegan los parametros al codigo.
+    dialecto: str = DIALECTO_LEAN
 
     # --- derivados -------------------------------------------------- #
     @property
@@ -224,6 +236,7 @@ class _Analizador(ast.NodeVisitor):
         self._simbolos_vistos: set[str] = set()
         self._alias: Dict[str, str] = {}
         self._clases: List[ast.ClassDef] = []
+        self._run_strategy: Optional[ast.FunctionDef] = None
 
     # --- utilidades de registro ------------------------------------- #
     def _add_simbolo(self, ticker: Optional[str]) -> None:
@@ -405,7 +418,36 @@ class _Analizador(ast.NodeVisitor):
         self.info.metodos.append(node.name)
         if node.name.startswith("on_") and node.name != "on_start":
             self.info.n_eventos += 1
+        if node.name == "run_strategy" and self._run_strategy is None:
+            self._run_strategy = node
+            doc = ast.get_docstring(node)
+            if doc and not self.info.docstring:
+                self.info.docstring = doc.strip()
+            self._parametros_run_strategy(node)
         self.generic_visit(node)
+
+    def _parametros_run_strategy(self, node: ast.FunctionDef) -> None:
+        """
+        Saca los parametros de `def run_strategy(data, fast_ma=12, slow_ma=26)`.
+
+        El primer argumento posicional es el DataFrame de precios y NUNCA es un
+        parametro (no hay con que-sliderarlo). El resto, si trae un valor por
+        defecto numerico, si es un parametro real de la estrategia y se expone
+        con el mismo tratamiento que `self._param()` en las clases Lean.
+        """
+        posicionales = list(node.args.posonlyargs) + list(node.args.args)
+        defaults = list(node.args.defaults)
+        if not defaults or len(posicionales) < 2:
+            return
+        # Los valores por defecto alinean a la cola de los posicionales, asi que el
+        # DataFrame `data` (sin valor por defecto) queda fuera automaticamente.
+        cola = defaults[-len(posicionales):]
+        primero = len(posicionales) - len(cola)
+        for indice, default in enumerate(cola):
+            arg = posicionales[primero + indice]
+            valor = _literal(default)
+            if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+                self._add_param(arg.arg, valor, origen="param")
 
     # --- auxiliares ------------------------------------------------- #
     def _add_param(self, nombre: str, valor: Any, origen: str) -> None:
@@ -556,19 +598,29 @@ def Resolution_nombre(valor: Any) -> str:
 # API publica
 # --------------------------------------------------------------------------- #
 def analizar_archivo(ruta: str | Path) -> EstrategiaInfo:
-    """Analiza un `.py` de estrategia y devuelve su metadata."""
+    """Analiza un `.py` de estrategia en disco y devuelve su metadata."""
     ruta = Path(ruta)
-    info = EstrategiaInfo(ruta=str(ruta), nombre_archivo=ruta.name)
     try:
         fuente = ruta.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:  # pragma: no cover
+        info = EstrategiaInfo(ruta=str(ruta), nombre_archivo=ruta.name)
         info.error = f"No se pudo leer: {exc}"
         return info
+    return analizar_fuente(fuente, nombre=ruta.name, ruta=str(ruta))
 
+
+def analizar_fuente(fuente: str, nombre: str = "<memoria>", ruta: str = "") -> EstrategiaInfo:
+    """
+    Analiza el codigo de una estrategia sin necesitar que este en disco.
+
+    Es lo que permite tratar igual un `.py` del proyecto y el borrador que la IA
+    acaba de generar en memoria: el motor solo necesita la metadata y el codigo.
+    """
+    info = EstrategiaInfo(ruta=ruta, nombre_archivo=nombre)
     lineas = fuente.count("\n") + 1
     info.lineas = lineas
     try:
-        arbol = ast.parse(fuente, filename=str(ruta))
+        arbol = ast.parse(fuente, filename=nombre)
     except SyntaxError as exc:
         info.error = f"Error de sintaxis linea {exc.lineno}: {exc.msg}"
         return info
@@ -582,8 +634,8 @@ def analizar_archivo(ruta: str | Path) -> EstrategiaInfo:
     # El analizador crea su propia EstrategiaInfo; se conservan los campos de
     # procedencia calculados antes de entrar al AST.
     info = analizador.info
-    info.ruta = str(ruta)
-    info.nombre_archivo = ruta.name
+    info.ruta = ruta
+    info.nombre_archivo = nombre
     info.lineas = lineas
 
     # Segunda pasada: barrido de literales tipo ticker en todo el archivo.
@@ -612,10 +664,24 @@ def analizar_archivo(ruta: str | Path) -> EstrategiaInfo:
     info.simbolos = sorted(analizador._simbolos_vistos)
     info.librerias = [l for l in dict.fromkeys(info.librerias) if l]
     info.metodos = list(dict.fromkeys(info.metodos))
-    info.valido = bool(info.clase)
 
-    if not info.clase:
-        info.error = "No se encontro ninguna clase que herede de QCAlgorithm"
+    # Dialecto: una clase Lean gana siempre; si no la hay, se acepta la funcion
+    # `run_strategy(data, ...)`. El motor despacha al ejecutor que corresponda,
+    # de modo que un archivo es ejecutable si expone CUALQUIERA de las dos formas.
+    if info.clase:
+        info.dialecto = DIALECTO_LEAN
+    elif analizador._run_strategy is not None:
+        info.dialecto = DIALECTO_VECTOR
+        info.clase = "run_strategy"
+    else:
+        info.dialecto = DIALECTO_NINGUNO
+    info.valido = info.dialecto != DIALECTO_NINGUNO
+
+    if not info.valido:
+        info.error = (
+            "No se encontro ninguna clase que herede de QCAlgorithm "
+            "ni una funcion `run_strategy(data, ...)`"
+        )
     if not info.simbolos:
         info.simbolos = ["SPY"]
     if info.capital is None:

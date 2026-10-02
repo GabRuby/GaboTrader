@@ -21,6 +21,11 @@ from qc_lab.core.analytics import (                      # noqa: E402
 from qc_lab.core.strategy_parser import analizar_archivo  # noqa: E402
 
 ARCHIVOS = [
+    # Dialecto vectorial: una funcion `run_strategy(data, ...)` por archivo.
+    "crawling_fluorescent.py",
+    "grid_trading_v2.py",
+    "otras/_estrategia_comparable_demo.py",
+    # Dialecto Lean: una clase que hereda de QCAlgorithm.
     "otras/SP500.py",
     "otras/tesla.py",
     "otras/SOXL.py",

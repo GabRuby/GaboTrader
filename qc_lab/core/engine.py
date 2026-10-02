@@ -29,7 +29,11 @@ import pandas as pd
 
 from qc_lab.core import datafeed
 from qc_lab.core import lean_runtime as lean
-from qc_lab.core.strategy_parser import EstrategiaInfo, analizar_archivo
+from qc_lab.core.strategy_parser import (
+    DIALECTO_VECTOR,
+    EstrategiaInfo,
+    analizar_archivo,
+)
 
 # Ventana de datos que se precarga ANTES de la fecha de inicio, por resolucion.
 # Es holgada a proposito: cubre el warm-up de LEAN (hasta 210 velas diarias) y las
@@ -589,8 +593,17 @@ def ejecutar_backtest(
     apalancamiento: float = 1.0,
     semilla: int = datafeed.DEFAULT_SEED,
     info: Optional[EstrategiaInfo] = None,
+    simbolo: Optional[str] = None,
+    benchmark: Optional[str] = None,
+    comision: Optional[float] = None,
 ) -> ResultadoBacktest:
-    """Ejecuta una estrategia y devuelve curvas, operaciones, metricas y logs."""
+    """Ejecuta una estrategia y devuelve curvas, operaciones, metricas y logs.
+
+    Es el punto de entrada UNICO del proyecto: despacha al motor Lean si el
+    archivo expone una clase `QCAlgorithm` y al ejecutor vectorial si expone
+    `run_strategy(data, ...)`. Los dos caminos devuelven el mismo
+    `ResultadoBacktest`, con las mismas metricas calculadas por `analytics`.
+    """
     inicio = _time.perf_counter()
     ruta = Path(ruta)
     info = info or analizar_archivo(ruta)
@@ -606,6 +619,24 @@ def ejecutar_backtest(
         res = ResultadoBacktest(info=info, exito=False, error=f"No se pudo leer el archivo: {exc}")
         res.duracion_s = _time.perf_counter() - inicio
         return res
+
+    # --- dialecto vectorial: misma contabilidad y mismas metricas ------- #
+    if info.dialecto == DIALECTO_VECTOR:
+        from qc_lab.core.vector_runner import COMISION_POR_DEFECTO, ejecutar_backtest_vector
+
+        return ejecutar_backtest_vector(
+            fuente,
+            info=info,
+            parametros=parametros,
+            capital=capital,
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            simbolo=simbolo,
+            benchmark=benchmark,
+            comision_rate=COMISION_POR_DEFECTO if comision is None else comision,
+            semilla=semilla,
+            etiqueta=info.nombre_archivo,
+        )
 
     # --- 1) Inyeccion de parametros --------------------------------- #
     fuente_modificada, aplicados = aplicar_parametros(fuente, parametros or {})

@@ -1,14 +1,13 @@
-﻿import inspect
-import os
+﻿import os
 import re
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import yfinance as yf
 from dotenv import load_dotenv
 from plotly.subplots import make_subplots
 
@@ -259,6 +258,16 @@ st.markdown(
 # GESTIÓN DE ARCHIVOS DE ESTRATEGIAS (.py)
 # -----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
+# `qc_lab` vive junto a la app, asi que se asegura la raiz del proyecto en el path
+# antes de importarlo: es el motor y tiene que resolverse siempre igual, se lance la
+# app con `streamlit run`, con el AppTest o como modulo.
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from qc_lab.core.compat import contrato_heredado
+from qc_lab.core.datafeed import available_tickers
+from qc_lab.core.runner import ConfigEjecucion, ejecutar_estrategia
+
 SKIP_DIRS = {
     "__pycache__", ".git", ".idea", ".vscode", ".pytest_cache",
     "venv", ".venv", "env", "node_modules", "site-packages",
@@ -301,9 +310,15 @@ COMPARE_KEY = "compare_selection"
 COMPARE_CACHE_KEY = "compare_cache"
 CHART_VIEW_KEY = "chart_view"
 MAX_COMPARATIVES = 2
-# Comisión estimada por cada fill (0.05 % del capital comprometido), usada por
-# `_finalize_backtest` porque el motor no modela tamaño de orden.
+# Comisión por ejecución (0.05 % del nocional). Ahora la aplica el motor de qc_lab
+# en el dialecto vectorial; en el dialecto Lean manda el modelo de broker que
+# declare la propia estrategia. Se conserva aquí como valor por defecto explicito.
 COMMISSION_RATE = 0.0005
+
+# Activos que el usuario puede elegir. El universo lo define el data feed de qc_lab,
+# de modo que la lista se deriva de el y no de un literal que se pueda quedar viejo.
+ASSETS = [t for t in available_tickers() if t in {"AAPL", "NVDA", "TSLA", "MSFT", "BTC"}] or ["SPY"]
+DEFAULT_ASSET_INDEX = ASSETS.index("TSLA") if "TSLA" in ASSETS else 0
 
 # El gestor del sidebar trabaja sobre rutas relativas posix ("otras/SP500.py"),
 # igual que usa el modal de apertura, para que ambosSelector convergieran en una clave.
@@ -426,31 +441,48 @@ REFERENCE_SNAPSHOT = {
 # -----------------------------------------------------------------------------
 # MOTOR DE DATOS Y BACKTESTING
 # -----------------------------------------------------------------------------
-def fetch_price_history(ticker, days=365):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-
-    try:
-        data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data = data.xs(ticker, level=1, axis=1)
-        data = data.dropna(subset=["Close"])
-        if data.empty:
-            raise ValueError("serie vacía")
-        return data[["Close"]], "live"
-    except Exception:
-        rng = np.random.default_rng(42)
-        idx = pd.date_range(end=end_date, periods=int(days * 1.35), freq="D")
-        drift = rng.normal(0.0006, 0.018, len(idx))
-        closes = 240.0 * np.exp(np.cumsum(drift))
-        return pd.DataFrame({"Close": closes}, index=idx), "offline"
+# El motor es `qc_lab`. Ni la estrategia principal ni las comparativas ni el
+# borrador calculan nada por su cuenta: todos pasan por `ejecutar_estrategia`, que
+# decide el dialecto (clase Lean o funcion `run_strategy`), aplica la configuracion
+# y devuelve un unico tipo de resultado. `qc_lab.core.compat` lo traduce despues al
+# contrato de columnas y claves que esta interfaz ya sabe leer, de modo que las
+# graficas, la tabla y la IA no pueden discrepar del motor.
+#
+# Las dos funciones siguientes son el UNICO punto por el que la interfaz pide una
+# corrida: cualquier consumidor nuevo debe llamar a una de las dos.
 
 
-def _finalize_backtest(df, capital, source, ticker, fast_ma, slow_ma):
-    """Calcula equity, benchmark, drawdown y métricas sobre un DataFrame ya preparado.
+def _config_lab(ticker, fast_ma, slow_ma, capital):
+    """Configuración de la corrida que se envía al motor de qc_lab."""
+    return ConfigEjecucion(
+        simbolo=str(ticker).upper(),
+        capital=float(capital),
+        comision=COMMISSION_RATE,
+        parametros={"fast_ma": int(fast_ma), "slow_ma": int(slow_ma)},
+    )
 
-    Es la única fuente de verdad de las métricas: la usan tanto el backtest principal
-    como el del borrador, para que la comparación sea homogénea.
+
+def _contrato_de_lab(resultado, ticker, capital, parametros, etiqueta):
+    """Traduce un `ResultadoBacktest` al par `(df, metrics)` de la interfaz."""
+    if not resultado.exito:
+        raise ValueError(resultado.error or f"{etiqueta} no se pudo ejecutar.")
+    return contrato_heredado(
+        resultado,
+        simbolo=str(ticker).upper(),
+        capital=float(capital),
+        parametros=parametros,
+        comision_rate=COMMISSION_RATE,
+    )
+
+
+def _legacy_finalize(df, capital, source, ticker, fast_ma, slow_ma):
+    """
+    Motor legacy de metrics sobre un DataFrame de precios y posiciones.
+
+    YA NO LO USA LA INTERFAZ: el cálculo lo hace `qc_lab.core.compat`. Se conserva,
+    con su regresion asociada, como red de seguridad mientras dure la migracion y
+    como referencia de a donde venian los numeros. Si alguna vez hay que volver
+    atras, esta funcion es el contrato que hay que reponer.
     """
     df = df.copy()
     if df.empty or "Close" not in df.columns:
@@ -534,85 +566,29 @@ def _finalize_backtest(df, capital, source, ticker, fast_ma, slow_ma):
     return df, metrics
 
 
-def run_strategy_backtest(ticker, fast_ma, slow_ma, capital=100000):
-    data, source = fetch_price_history(ticker)
+def run_strategy_backtest(script, ticker, fast_ma, slow_ma, capital=100000):
+    """Ejecuta la Estrategia Principal en el motor de qc_lab y devuelve (df, metrics).
 
-    df = data.copy()
-    df["SMA_Fast"] = df["Close"].rolling(window=int(fast_ma)).mean()
-    df["SMA_Slow"] = df["Close"].rolling(window=int(slow_ma)).mean()
-    df = df.dropna(subset=["SMA_Fast", "SMA_Slow"]).copy()
-
-    df["Signal"] = np.where(df["SMA_Fast"] > df["SMA_Slow"], 1, 0)
-    df["Position"] = df["Signal"].shift(1).fillna(0)
-
-    return _finalize_backtest(df, capital, source, ticker, fast_ma, slow_ma)
+    Acepta el archivo y no un simple ticker: el motor es el unico que sabe si la
+    estrategia es una clase Lean o una funcion `run_strategy`, y ademas decide fechas,
+    capital y universo a partir de lo que la propia estrategia declare.
+    """
+    cfg = _config_lab(ticker, fast_ma, slow_ma, capital)
+    resultado = ejecutar_estrategia(BASE_DIR / script, config=cfg)
+    return _contrato_de_lab(resultado, ticker, capital, cfg.parametros, script)
 
 
 def run_source_backtest(source_code, ticker, fast_ma, slow_ma, capital, etiqueta="La estrategia"):
-    """Ejecuta código fuente de una estrategia y devuelve (df, metrics).
+    """Ejecuta código fuente de una estrategia en el motor de qc_lab y devuelve (df, metrics).
 
-    El código se compila y se ejecuta en un espacio de nombres aislado. Es el mismo
-    tratamiento que recibe el borrador de la IA, así que una estrategia comparativa
-    se comporta exactamente igual que un script local de la carpeta de trabajo.
+    El mismo tratamiento recibe un `.py` de la carpeta que el borrador que la IA
+    acaba de generar en memoria: los dos entran por `ejecutar_estrategia`, asi que
+    una comparativa se comporta exactamente igual que la Estrategia Principal.
     """
-    if not (source_code or "").strip():
-        raise ValueError(f"{etiqueta} está vacío.")
-
-    namespace: dict = {"__name__": "draft_strategy"}
-    try:
-        exec(compile(source_code, f"<{etiqueta.lower()}>", "exec"), namespace)
-    except SyntaxError as exc:
-        raise ValueError(f"Error de sintaxis en la línea {exc.lineno}: {exc.msg}") from exc
-    except ModuleNotFoundError as exc:
-        # Los .py exportados de QuanConnect dependen del runtime de AlgorithmImports,
-        # que no existe fuera de Lean. Es el caso más común al comparar proyectos reales.
-        raise ValueError(
-            f"{etiqueta} usa `{exc.name}` de QuantConnect, que solo existe dentro del "
-            "runtime de Lean. Cópiala al editor y expón la lógica como "
-            "`run_strategy(data, fast_ma, slow_ma)` para poder compararla aquí."
-        ) from exc
-    except Exception as exc:
-        raise ValueError(f"{etiqueta} falló al definirse: {type(exc).__name__}: {exc}") from exc
-
-    entry = namespace.get("run_strategy")
-    if not callable(entry):
-        raise ValueError(f"{etiqueta} no define una función `run_strategy(data, ...)`.")
-
-    data, source = fetch_price_history(ticker)
-    df = data.copy()
-
-    try:
-        params = inspect.signature(entry).parameters
-    except (TypeError, ValueError):
-        params = {}
-
-    kwargs = {}
-    if "fast_ma" in params:
-        kwargs["fast_ma"] = int(fast_ma)
-    if "slow_ma" in params:
-        kwargs["slow_ma"] = int(slow_ma)
-
-    # Métricas efectivo: los que el borrador realmente aplicó, no los pedidos
-    ma_efectiva = int(kwargs.get("fast_ma", fast_ma))
-    ma_lenta_efectiva = int(kwargs.get("slow_ma", slow_ma))
-
-    try:
-        result = entry(df, **kwargs)
-    except Exception as exc:
-        if not kwargs:
-            raise ValueError(f"`run_strategy` falló: {type(exc).__name__}: {exc}") from exc
-        # La firma quizá no acepta los parámetros opcionales: se reintenta sin ellos
-        try:
-            result = entry(df)
-        except Exception:
-            raise ValueError(f"`run_strategy` falló: {type(exc).__name__}: {exc}") from exc
-
-    if isinstance(result, pd.DataFrame):
-        df = result
-    if not isinstance(df, pd.DataFrame):
-        raise ValueError("`run_strategy` debe devolver un DataFrame de pandas.")
-
-    return _finalize_backtest(df, capital, source, ticker, ma_efectiva, ma_lenta_efectiva)
+    cfg = _config_lab(ticker, fast_ma, slow_ma, capital)
+    cfg.etiqueta = etiqueta
+    resultado = ejecutar_estrategia(fuente=source_code, config=cfg)
+    return _contrato_de_lab(resultado, ticker, capital, cfg.parametros, etiqueta)
 
 
 def run_draft_backtest(source_code, ticker, fast_ma, slow_ma, capital):
@@ -627,10 +603,7 @@ def run_comparative_backtest(script, ticker, fast_ma, slow_ma, capital):
     rota no tumbe la comparación completa.
     """
     try:
-        df, metrics = run_source_backtest(
-            read_script_source(script), ticker, fast_ma, slow_ma, capital,
-            f"La comparativa {Path(script).name}",
-        )
+        df, metrics = run_strategy_backtest(script, ticker, fast_ma, slow_ma, capital)
     except Exception as exc:
         return None, {"error": str(exc), "script": script}
     return df, metrics
@@ -658,13 +631,29 @@ PARAMS_KEY = "backtest_params"
 
 
 def get_backtest_result(ticker, fast_ma, slow_ma, capital, force=False):
-    params = (ticker, int(fast_ma), int(slow_ma), float(capital))
+    """Resultado del backtest de la Estrategia Principal, cacheado por parámetros.
+
+    La Estrategia Principal se lee del estado de sesión y se ejecuta en `qc_lab` igual
+    que cualquier comparativa. Si el motor no puede ejecutarla se devuelve la curva y
+    las metricas de referencia con el motivo en `error`, para que el panel siga
+    operativo en lugar de dejar la app a medias.
+    """
+    script = st.session_state.get(PRINCIPAL_KEY) or (py_files[0] if py_files else "")
+    params = (script, ticker, int(fast_ma), int(slow_ma), float(capital))
     cached = st.session_state.get(RESULT_KEY)
 
     if not force and cached is not None and st.session_state.get(PARAMS_KEY) == params:
         return cached["df"], cached["metrics"]
 
-    df, metrics = run_strategy_backtest(ticker, fast_ma, slow_ma, capital)
+    try:
+        df, metrics = run_strategy_backtest(script, ticker, fast_ma, slow_ma, capital)
+    except Exception as exc:
+        df = pd.DataFrame({"Equity": [float(capital)], "Benchmark": [float(capital)],
+                           "Drawdown": [0.0], "Position": [0.0]},
+                          index=pd.to_datetime([datetime.now().normalize()]))
+        metrics = {**REFERENCE_SNAPSHOT, "error": str(exc), "source": "sin ejecutar", "bars": 1,
+                   "ticker": ticker, "capital": float(capital), "sharpe": REFERENCE_SNAPSHOT["sharpe"]}
+
     st.session_state[RESULT_KEY] = {"df": df, "metrics": metrics}
     st.session_state[PARAMS_KEY] = params
     return df, metrics
@@ -1592,7 +1581,7 @@ with st.sidebar:
         st.toast(flash_msg, icon="✅")
 
     st.caption("⚙️️ PARÁMETROS")
-    asset = st.selectbox("Activo / Ticker", ["AAPL", "NVDA", "TSLA", "MSFT", "BTC-USD"], index=2)
+    asset = st.selectbox("Activo / Ticker", ASSETS, index=DEFAULT_ASSET_INDEX)
     fast_period = st.slider("SMA Rápida", min_value=5, max_value=50, value=10)
     slow_period = st.slider("SMA Lenta", min_value=20, max_value=200, value=50)
     initial_cap = st.number_input("Capital Inicial ($)", value=100000, step=10000)
@@ -1611,15 +1600,17 @@ with st.sidebar:
 force_run = st.session_state.pop("force_run", False)
 df_res, metrics = get_backtest_result(asset, fast_period, slow_period, initial_cap, force=force_run)
 
-live = metrics["source"] == "live"
-fallback_metrics = REFERENCE_SNAPSHOT if not live else None
+# El motor de qc_lab produce datos reales siempre, así que el snapshot de referencia
+# solo entra cuando la Estrategia Principal no se ha podido ejecutar.
+live = "error" not in metrics
+fallback_metrics = None if live else REFERENCE_SNAPSHOT
 
 def auto(key):
     return metrics[key] if live else fallback_metrics[key]
 
 
 def display_metrics() -> dict:
-    """Métricas tal y como las muestran las tarjetas KPI, con el respaldo de referencia offline."""
+    """Métricas tal y como las muestran las tarjetas KPI, con el respaldo de referencia."""
     return {**metrics, **{key: auto(key) for key in REFERENCE_SNAPSHOT}}
 
 def read_draft_curve(state) -> tuple[dict | None, pd.Series | None]:
