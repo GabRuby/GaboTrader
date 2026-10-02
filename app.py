@@ -234,6 +234,21 @@ st.markdown(
     [data-testid="stSidebar"] .block-container { padding-top: 0.6rem; }
     [data-testid="stSidebarUserContent"] .block-container { padding-left: 1rem; padding-right: 1rem; }
 
+    /* Grupos contraíbles del panel izquierdo: tarjeta con encabezado y flecha a la derecha */
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px;
+        margin-bottom: 8px; overflow: hidden;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        padding: 9px 12px; background: #f8fafc; cursor: pointer;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary:hover { background: #f1f5f9; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary p {
+        font-size: 11.5px; font-weight: 700; letter-spacing: .07em;
+        text-transform: uppercase; color: #334155;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpanderDetails"] { padding: 2px 12px 6px; }
+
     /* Widgets base */
     .stSelectbox div[data-baseweb="select"] > div,
     .stTextInput input, .stNumberInput input {
@@ -1554,6 +1569,17 @@ def render_strategy_manager(available: list[str], principal: str) -> str:
 # -----------------------------------------------------------------------------
 # SIDEBAR
 # -----------------------------------------------------------------------------
+# Grupos del panel izquierdo. En G.3.3 solo se crea la estructura: los controles
+# actuales siguen renderizandose igual y se moveran a su grupo en la fase siguiente.
+SIDEBAR_GROUPS = (
+    "📁 ESTRATEGIAS",
+    "⚖️ ESTRATEGIAS A COMPARAR",
+    "⚙️ REGLAS COMUNES",
+    "🎛️ PARÁMETROS DE LA ESTRATEGIA",
+    "📊 OPCIONES DE VISUALIZACIÓN",
+    "💡 ESTADO DEL BACKTEST",
+)
+
 with st.sidebar:
     st.markdown(
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">'
@@ -1563,6 +1589,12 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.caption(f"LEAN Engine: {ENGINE_VERSION}")
+
+    # Los seis grupos contraíbles, cada uno con su encabezado (icono + titulo) y
+    # su indicador de contraccion a la derecha.
+    for grupo in SIDEBAR_GROUPS:
+        with st.expander(grupo, expanded=False, key=f"grp_{grupo}"):
+            pass
 
     st.markdown("---")
     st.caption("📁 PROYECTOS / ESTRATEGIAS (.py)")
