@@ -1,4 +1,5 @@
-﻿import os
+﻿import ast
+import os
 import re
 import sys
 from datetime import datetime
@@ -122,7 +123,7 @@ st.markdown(
     /* Gestor de estrategias: principal ⭐ y comparativas [x] */
     .strategy-row {
         display: flex; align-items: center; gap: 8px;
-        padding: 6px 9px; margin-bottom: 6px;
+        padding: 10px 11px; margin-bottom: 6px;
         border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff;
     }
     .strategy-row.principal {
@@ -141,7 +142,38 @@ st.markdown(
     }
     .strategy-subtitle {
         font-size: 10.5px; font-weight: 700; letter-spacing: .05em;
-        color: #64748b; margin: 8px 0 4px;
+        color: #64748b; margin: 10px 0 6px;
+    }
+
+    /* G.3.6 · Grupo 1 (ESTRATEGIAS): el botón de apertura y la fila de la Principal
+       van separados por un subtítulo y respiran con altura mínima, para que el grupo
+       se lea de un vistazo en vez de quedar prensado en dos líneas. */
+    .st-key-grp_estrategias [data-testid="stExpanderDetails"] {
+        padding: 10px 12px 12px; min-height: 150px;
+    }
+    .st-key-grp_estrategias .stButton button { min-height: 38px; }
+
+    /* G.3.6 · Grupo 2 (ESTRATEGIAS A COMPARAR): dos huecos de altura fija. Los
+       vacíos son un marco discontinuo con la pista de lo que irá ahí; los llenos
+       llevan el número de orden para que se vean como ranuras 1 y 2. */
+    .compare-slot {
+        display: flex; align-items: center; gap: 8px;
+        min-height: 40px; padding: 7px 10px; margin-bottom: 8px;
+        border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff;
+    }
+    .compare-slot .compare-index {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 18px; height: 18px; flex: 0 0 18px; border-radius: 999px;
+        background: #f1f5f9; border: 1px solid #cbd5e1; color: #475569;
+        font-size: 10px; font-weight: 700;
+    }
+    .compare-slot .strategy-name {
+        flex: 1; font-size: 12.5px; font-weight: 600; color: #0f172a;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .compare-slot.empty {
+        border-style: dashed; background: #f8fafc; color: #94a3b8;
+        font-size: 11.5px; font-weight: 600; justify-content: center;
     }
 
     /* Barra superior de métricas (KPIs) */
@@ -345,7 +377,27 @@ PARAMETROS_ACTIVOS: dict = {}
 # Activos que el usuario puede elegir. El universo lo define el data feed de qc_lab,
 # de modo que la lista se deriva de el y no de un literal que se pueda quedar viejo.
 ASSETS = [t for t in available_tickers() if t in {"AAPL", "NVDA", "TSLA", "MSFT", "BTC"}] or ["SPY"]
-DEFAULT_ASSET_INDEX = ASSETS.index("TSLA") if "TSLA" in ASSETS else 0
+
+# G.3.6: valores de respaldo del grupo REGLAS COMUNES. Solo se usan cuando el archivo
+# de la Estrategia Principal NO declara el dato: nunca son el valor permanente.
+DEFAULT_TICKER = "TSLA"
+DEFAULT_CAPITAL = 100000.0
+
+# Un literal de ticker: 1-5 mayúsculas, con sufijo opcional de 1-2 letras (`BRK-B`).
+RE_TICKER_DECLARADO = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
+# Índices y referencias de mercado, y reservas/liquidez: los agrupa el mismo criterio
+# que usa `EstrategiaInfo.tickers_riesgo`. Si el archivo los declara junto al activo que
+# se opera, el Activo / Ticker es el que queda fuera de estos dos conjuntos.
+TICKERS_MACRO = {"SPY", "SPX", "QQQ", "IWM", "VIX", "DIA", "MDY"}
+TICKERS_RESERVA = {"SHV", "SHY", "BIL", "SGOV", "TLT", "IEF", "GLD"}
+
+# G.3.6: los dos controles del grupo REGLAS COMUNES y el archivo Principal del que
+# proceden. `*_ORIGEN_KEY` guarda de qué estrategia se leyeron, para recargarlos cuando
+# cambia la Principal y NO pisarlos cuando el usuario los edita a mano.
+ACTIVO_KEY = "reglas_activo"
+CAPITAL_KEY = "reglas_capital"
+ACTIVO_ORIGEN_KEY = "reglas_activo_origen"
+CAPITAL_ORIGEN_KEY = "reglas_capital_origen"
 
 # El gestor del sidebar trabaja sobre rutas relativas posix ("otras/SP500.py"),
 # igual que usa el modal de apertura, para que ambosSelector convergieran en una clave.
@@ -410,6 +462,110 @@ def set_principal_strategy(script: str, available: list[str]) -> None:
     st.session_state.pop("bt_ai_auto_done", None)
     st.session_state.pop("force_run", None)
     st.session_state["flash_msg"] = f"⭐ `{script}` es ahora la Estrategia Principal"
+
+
+def add_comparative_strategy(script: str, available: list[str]) -> tuple[bool, str]:
+    """Añade `script` a las comparativas y devuelve `(aceptado, mensaje)`.
+
+    Es el único camino de alta del grupo ESTRATEGIAS A COMPARAR: no toca la Estrategia
+    Principal ni el editor, porque comparar no puede cambiar lo que se está evaluando.
+    Respeta `MAX_COMPARATIVES` y nunca admite la Principal como candidata.
+    """
+    if script not in available:
+        return False, f"`{script}` ya no está en el proyecto."
+
+    if script == st.session_state.get(PRINCIPAL_KEY):
+        return False, f"`{script}` ya es la Estrategia Principal: no se compara consigo misma."
+
+    selected = list(st.session_state.get(COMPARE_KEY) or [])
+    if script in selected:
+        return False, f"`{script}` ya está en la lista de comparativas."
+    if len(selected) >= MAX_COMPARATIVES:
+        return False, f"Solo caben {MAX_COMPARATIVES} comparativas."
+
+    st.session_state[COMPARE_KEY] = selected + [script]
+    return True, f"⚖️ `{script}` añadida a comparar"
+
+
+# -----------------------------------------------------------------------------
+# DATOS QUE DECLARA LA ESTRATEGIA PRINCIPAL (G.3.6)
+# -----------------------------------------------------------------------------
+# El grupo REGLAS COMUNES no se inventa el Activo / Ticker ni el Capital Inicial: los
+# lee del archivo que actúa como Principal y solo cae al valor de respaldo cuando el
+# archivo no los declara. Lo que sale de aquí sigue siendo el único valor que alimenta
+# `_config_lab`, de modo que motor, comparativas y borrador no pueden discrepar.
+
+
+def tickers_declarados(path: Path) -> list[str]:
+    """Tickers que el propio archivo declara como literales, en orden de aparición.
+
+    Hace falta este barrido porque `strategy_parser` completa `info.simbolos` con `SPY`
+    y `info.capital` con 100000 cuando el archivo no dice nada: con la metadata ya
+    completada no se puede distinguir "lo declara el archivo" de "lo pone el motor".
+    Se ordenan por linea para que el primero sea el que aparece antes en el codigo.
+    """
+    try:
+        arbol = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return []
+
+    universo = set(available_tickers())
+    declarados: list[tuple[int, str]] = []
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.Constant) and isinstance(nodo.value, str):
+            ticker = nodo.value.upper()
+            if ticker in universo and RE_TICKER_DECLARADO.match(ticker):
+                declarados.append((getattr(nodo, "lineno", 0), ticker))
+    return list(dict.fromkeys(ticker for _, ticker in sorted(declarados)))
+
+
+def reglas_comunes_de_estrategia(path: Path, info=None) -> tuple[str, float]:
+    """`(ticker, capital)` del archivo de la Estrategia Principal, con su respaldo.
+
+    El Activo / Ticker es el primer ticker declarado que no sea índice ni reserva; si
+    el archivo solo declara índices (una estrategia sobre SPY) se usa ese mismo, porque
+    ahí sí es el instrumento. El capital es el que declara el archivo y, si no declara
+    ninguno, el respaldo. El benchmark del archivo NO se lee aquí: es otro concepto.
+    """
+    info = info if info is not None else strategy_parser.analizar_archivo(path)
+    declarados = tickers_declarados(path)
+    riesgo = [t for t in declarados if t not in TICKERS_MACRO | TICKERS_RESERVA] or declarados
+    ticker = riesgo[0] if riesgo else DEFAULT_TICKER
+    capital = float(info.capital) if info.capital else DEFAULT_CAPITAL
+    return ticker, capital
+
+
+def opciones_activo_ui(ticker: str) -> list[str]:
+    """Activos del selector con el del archivo de la Principal en primera posición.
+
+    El ticker declarado puede no estar en la lista corta de `ASSETS` (SOXL, TQQQ, SPY...):
+    anteponiéndolo se muestra el valor real del archivo sin inventar ningún otro activo.
+    """
+    return [ticker, *[t for t in ASSETS if t != ticker]]
+
+
+def sincronizar_reglas_comunes(script: str, info=None) -> tuple[str, float]:
+    """Siembra los dos controles del grupo REGLAS COMUNES con lo que declara `script`.
+
+    Los valores se releen cuando cambia la Estrategia Principal; mientras la Principal
+    sea la misma se respetan las ediciones manuales del usuario sobre los dos campos.
+    """
+    ticker, capital = reglas_comunes_de_estrategia(BASE_DIR / script, info)
+
+    if st.session_state.get(ACTIVO_ORIGEN_KEY) != script:
+        st.session_state[ACTIVO_ORIGEN_KEY] = script
+        st.session_state[ACTIVO_KEY] = ticker
+        st.session_state[CAPITAL_ORIGEN_KEY] = script
+        st.session_state[CAPITAL_KEY] = capital
+
+    # Red de seguridad: un valor guardado que ya no existe (ticker retirado del
+    # proyecto) vuelve al de la estrategia en vez de dejar el control cojo.
+    if st.session_state.get(ACTIVO_KEY) not in opciones_activo_ui(ticker):
+        st.session_state[ACTIVO_KEY] = ticker
+    if not st.session_state.get(CAPITAL_KEY):
+        st.session_state[CAPITAL_KEY] = DEFAULT_CAPITAL
+
+    return st.session_state[ACTIVO_KEY], st.session_state[CAPITAL_KEY]
 
 
 DEFAULT_STRATEGIES = {
@@ -1177,6 +1333,15 @@ def render_draft_area(base_values: dict, ticker, fast_ma, slow_ma, capital):
 # -----------------------------------------------------------------------------
 # MODAL: ABRIR ESTRATEGIA DESDE QUANTCONNECT
 # -----------------------------------------------------------------------------
+# Un solo modal para las dos altas: el grupo ESTRATEGIAS lo abre para cargar la
+# Estrategia Principal y el grupo ESTRATEGIAS A COMPARAR lo abre para sumar una
+# comparativa. Lo que cambia es el destino del botón final, no el selector de archivos:
+# así no hay dos mecanismos explorando el proyecto.
+MODO_PRINCIPAL = "principal"
+MODO_COMPARATIVA = "comparativa"
+MODAL_MODO_KEY = "modal_modo"
+
+
 @st.dialog("📂 Abrir Estrategia desde QuanConnect", width="medium")
 def modal_abrir_estrategia():
     st.caption(f"📍 Directorio base: `{BASE_DIR}`")
@@ -1234,8 +1399,24 @@ def modal_abrir_estrategia():
     with st.expander("👁️ Vista previa del código", expanded=False):
         st.code(source, language="python")
 
-    if st.button("📥 Cargar en Editor", type="primary", use_container_width=True, key="modal_load"):
+    modo = st.session_state.get(MODAL_MODO_KEY, MODO_PRINCIPAL)
+    es_comparativa = modo == MODO_COMPARATIVA
+
+    if st.button(
+        "⚖️ Agregar a comparar" if es_comparativa else "📥 Cargar en Editor",
+        type="primary", use_container_width=True, key="modal_load",
+    ):
         rel_path = file_path.relative_to(BASE_DIR).as_posix()
+
+        if es_comparativa:
+            # Alta de comparativa: la Principal, el editor y el código cargado no se tocan.
+            aceptado, mensaje = add_comparative_strategy(rel_path, ALL_STRATEGIES)
+            if not aceptado:
+                st.warning(f"⚠️ {mensaje}")
+                return
+            st.session_state["flash_msg"] = mensaje
+            st.rerun()
+
         st.session_state["codigo_actual"] = source
         st.session_state["codigo_actual_script"] = rel_path
         # Cargar desde el modal equivale a promover esa estrategia a Principal ⭐.
@@ -1517,77 +1698,85 @@ def render_principal_panel(principal: str) -> None:
     )
 
 
-def render_comparativas_panel(available: list[str], principal: str, pending: dict) -> bool:
-    """Pinta las comparativas y deja los clics en `pending`.
+def render_comparativas_panel(available: list[str], principal: str, pending: dict) -> None:
+    """Pinta los `MAX_COMPARATIVES` huecos y deja los clics en `pending`.
 
-    Devuelve False cuando no hay ninguna estrategia mas que comparar, que es el caso en
-    que antes el gestor retornaba sin llegar a tocar `COMPARE_KEY`.
+    El grupo ya no lista el catálogo completo: son dos ranuras y un botón que abre el
+    mismo modal que «Abrir Estrategia». Cada ranura llena trae su propia baja, y ninguna
+    de las dos vías de este grupo puede promover una comparativa a Principal.
     """
-    selected = st.session_state.get(COMPARE_KEY, [])
+    selected = list(st.session_state.get(COMPARE_KEY, []))[:MAX_COMPARATIVES]
+    st.session_state[COMPARE_KEY] = selected
 
-    others = [script for script in available if script != principal]
-    if not others:
-        st.caption("No hay otras estrategias para comparar.")
-        return False
-
-    st.markdown(
-        '<div class="strategy-subtitle">Estrategias a comparar '
-        f'(máx. {MAX_COMPARATIVES})</div>',
-        unsafe_allow_html=True,
-    )
-
-    for script in others:
-        is_marked = script in selected
-        label_col, check_col = st.columns([0.22, 0.78], vertical_alignment="center", gap="small")
-        with label_col:
-            if st.button(
-                "☆" if not is_marked else "★",
-                key=f"star_{script}",
-                help=f"Convertir `{script}` en Estrategia Principal",
-                use_container_width=True,
-            ):
-                pending["star"] = script
-        with check_col:
-            checked = st.checkbox(
-                script,
-                value=is_marked,
-                key=f"cmp_{script}",
-                help=f"Comparar `{script}` contra la principal",
+    for pos in range(MAX_COMPARATIVES):
+        if pos >= len(selected):
+            st.markdown(
+                f'<div class="compare-slot empty">Comparativa {pos + 1} · vacía</div>',
+                unsafe_allow_html=True,
             )
-            pending["checks"][script] = checked
-    return True
+            continue
+
+        script = selected[pos]
+        nombre_col, quitar_col = st.columns(
+            [0.78, 0.22], vertical_alignment="center", gap="small"
+        )
+        with nombre_col:
+            st.markdown(
+                f'<div class="compare-slot"><span class="compare-index">{pos + 1}</span>'
+                f'<span class="strategy-name">{script}</span></div>',
+                unsafe_allow_html=True,
+            )
+        with quitar_col:
+            if st.button(
+                "✕", key=f"rm_comparativa_{pos}",
+                help=f"Quitar `{script}` de la comparación", use_container_width=True,
+            ):
+                # Una baja llega como `False` en los mismos checks de antes.
+                pending["checks"][script] = False
+
+    hay_margen = len(selected) < MAX_COMPARATIVES
+    if not hay_margen:
+        st.caption(f"Ya no caben más comparativas (máximo {MAX_COMPARATIVES}).")
+    elif len(available) <= 1:
+        st.caption("No hay otras estrategias en el proyecto para comparar.")
+    else:
+        st.caption(f"Comparativas: {len(selected)} de {MAX_COMPARATIVES}.")
+
+    puede_agregar = hay_margen and len(available) > 1
+    if st.button(
+        "+ Agregar estrategia a comparar",
+        use_container_width=True,
+        key="btn_add_comparativa",
+        disabled=not puede_agregar,
+        help=(f"Máximo {MAX_COMPARATIVES} comparativas." if not hay_margen
+              else "Abre el selector de estrategias del proyecto."),
+    ):
+        st.session_state[MODAL_MODO_KEY] = MODO_COMPARATIVA
+        modal_abrir_estrategia()
 
 
-def aplicar_gestor_pendientes(available: list[str], principal: str, pending: dict, hay_comparativas: bool) -> str:
+def aplicar_gestor_pendientes(available: list[str], principal: str, pending: dict) -> str:
     """Aplica los clics de ambos grupos y devuelve la Estrategia Principal vigente.
 
-    Mismas reglas que antes: la ⭐ manda sobre el recorte, solo caben MAX_COMPARATIVES y
-    el aviso de descarte se muestra una sola vez.
+    Las altas de comparativa llegan ya aplicadas por `add_comparative_strategy` (que es
+    quien valida el límite y la exclusión de la Principal); por aquí solo pasan las
+    bajas, que llegan en `pending["checks"]` como `False`.
     """
-    if not hay_comparativas:
-        return principal
-
     pending_star = pending["star"]
     pending_checks = pending["checks"]
-    selected = st.session_state.get(COMPARE_KEY, [])
 
     if pending_star is not None:
         set_principal_strategy(pending_star, available)
         st.rerun()
 
-    next_selected = [s for s, checked in pending_checks.items() if checked][:MAX_COMPARATIVES]
+    selected = list(st.session_state.get(COMPARE_KEY, []))
+    next_selected = [s for s in selected if pending_checks.get(s, True)][:MAX_COMPARATIVES]
     dropped = [s for s in selected if s not in next_selected]
-    overflow = [s for s, checked in pending_checks.items() if checked and s not in next_selected]
-    if dropped or overflow:
+    if dropped:
         st.session_state[COMPARE_KEY] = next_selected
-        # Los checkboxes desmarcados por el recorte guardan su valor viejo.
-        for script in overflow:
-            st.session_state.pop(f"cmp_{script}", None)
-        if overflow:
-            st.session_state["compare_notice"] = (
-                f"Solo caben {MAX_COMPARATIVES} comparativas: se descartó "
-                + ", ".join(Path(s).name for s in overflow)
-            )
+        st.session_state["compare_notice"] = "Se quitó la comparativa " + ", ".join(
+            Path(s).name for s in dropped
+        )
         st.rerun()
 
     st.session_state[COMPARE_KEY] = next_selected
@@ -1671,26 +1860,35 @@ with st.sidebar:
     st.caption(f"LEAN Engine: {ENGINE_VERSION}")
 
     # --- 1. ESTRATEGIAS -------------------------------------------------
+    # G.3.6: el grupo se reparte en dos bloques (apertura y Principal) con altura
+    # suficiente para que ambos se lean sin venir prensados.
     with st.expander(SIDEBAR_GROUPS[0], expanded=True, key="grp_estrategias"):
+        st.markdown(
+            '<div class="strategy-subtitle">📂 Abrir Estrategia (.py)</div>',
+            unsafe_allow_html=True,
+        )
         if st.button("📂 Abrir Estrategia", use_container_width=True, key="btn_open_strategy"):
+            st.session_state[MODAL_MODO_KEY] = MODO_PRINCIPAL
             modal_abrir_estrategia()
 
         principal_script = st.session_state[PRINCIPAL_KEY]
         if st.session_state.get("script_selector") not in ALL_STRATEGIES:
             st.session_state["script_selector"] = principal_script
 
+        st.markdown(
+            '<div class="strategy-subtitle">⭐ Estrategia Principal</div>',
+            unsafe_allow_html=True,
+        )
         render_principal_panel(principal_script)
 
     # --- 2. ESTRATEGIAS A COMPARAR --------------------------------------
     pending_gestor = {"star": None, "checks": {}}
     with st.expander(SIDEBAR_GROUPS[1], expanded=False, key="grp_comparar"):
-        hay_comparativas = render_comparativas_panel(
-            ALL_STRATEGIES, principal_script, pending_gestor
-        )
+        render_comparativas_panel(ALL_STRATEGIES, principal_script, pending_gestor)
 
     # Los clics de los dos grupos se resuelven juntos, igual que antes.
     selected_script = aplicar_gestor_pendientes(
-        ALL_STRATEGIES, principal_script, pending_gestor, hay_comparativas
+        ALL_STRATEGIES, principal_script, pending_gestor
     )
     st.session_state["script_nombre"] = selected_script
 
@@ -1698,16 +1896,31 @@ with st.sidebar:
     if flash_msg:
         st.toast(flash_msg, icon="✅")
 
+    # Una sola lectura del archivo de la Principal la comparten el grupo 3 (sus reglas
+    # comunes) y el grupo 4 (sus parámetros ajustables).
+    info_estrategia = strategy_parser.analizar_archivo(BASE_DIR / selected_script)
+
     # --- 3. REGLAS COMUNES ----------------------------------------------
+    # G.3.6: los dos campos de este grupo salen del archivo de la Estrategia Principal.
+    # Si el archivo no declara el dato se usa el respaldo (TSLA / 100000) y, si la
+    # Principal cambia, ambos campos se vuelven a leer de la nueva estrategia.
     with st.expander(SIDEBAR_GROUPS[2], expanded=True, key="grp_reglas"):
-        asset = st.selectbox("Activo / Ticker", ASSETS, index=DEFAULT_ASSET_INDEX)
-        initial_cap = st.number_input("Capital Inicial ($)", value=100000, step=10000)
+        ticker_principal, _ = sincronizar_reglas_comunes(selected_script, info_estrategia)
+        asset = st.selectbox(
+            "Activo / Ticker", opciones_activo_ui(ticker_principal), key=ACTIVO_KEY
+        )
+        initial_cap = st.number_input(
+            "Capital Inicial ($)", min_value=1.0, step=10000.0, key=CAPITAL_KEY
+        )
+        st.caption(
+            f"⤵ Reglas de `{Path(selected_script).name}` "
+            f"(respaldo: {DEFAULT_TICKER} / ${DEFAULT_CAPITAL:,.0f})."
+        )
 
     # --- 4. PARÁMETROS DE LA ESTRATEGIA ---------------------------------
     # Se reconstruyen en cada run: el conjunto depende del archivo elegido como Principal.
     PARAMETROS_ACTIVOS.clear()
     with st.expander(SIDEBAR_GROUPS[3], expanded=True, key="grp_parametros"):
-        info_estrategia = strategy_parser.analizar_archivo(BASE_DIR / selected_script)
         if info_estrategia.error:
             st.caption(f"⚠️ {info_estrategia.error}")
         elif not info_estrategia.parametros:
