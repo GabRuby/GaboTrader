@@ -288,3 +288,69 @@ def test_la_principal_se_saca_de_las_comparativas(monkeypatch):
 
     assert app.st.session_state[app.PRINCIPAL_KEY] == "a.py"
     assert app.st.session_state[app.COMPARE_KEY] == ["b.py"]
+
+
+# --------------------------------------------------------------------------- #
+# GRUPO 1 · estado vacio, asignacion y baja de la Estrategia Principal
+# --------------------------------------------------------------------------- #
+def test_el_grupo_1_arranca_vacio(monkeypatch):
+    """Sin Principal previa el estado queda vacio: no se promueve el primer archivo."""
+    monkeypatch.setitem(app.st.session_state, app.PRINCIPAL_KEY, None)
+
+    app.ensure_strategy_state(["vector.py", "a.py"])
+
+    assert app.st.session_state[app.PRINCIPAL_KEY] is None
+
+
+def test_una_principal_borrada_del_proyecto_deja_el_grupo_vacio(monkeypatch):
+    """Si el archivo de la Principal ya no esta, tampoco se elige otro en su lugar."""
+    monkeypatch.setitem(app.st.session_state, app.PRINCIPAL_KEY, "se_fue.py")
+
+    app.ensure_strategy_state(["vector.py", "a.py"])
+
+    assert app.st.session_state[app.PRINCIPAL_KEY] is None
+
+
+def test_el_bote_de_basura_no_toca_los_archivos_ni_las_comparativas(proyecto, monkeypatch):
+    """La baja de la Principal solo deshace la asignacion en memoria."""
+    ruta = escribir(proyecto, "vector.py", VECTOR)
+    monkeypatch.setitem(app.st.session_state, app.COMPARE_KEY, ["a.py"])
+    monkeypatch.setitem(app.st.session_state, "script_nombre", "vector.py")
+    monkeypatch.setitem(app.st.session_state, app.RESULT_KEY, {"df": None, "metrics": {}})
+
+    app.clear_principal_strategy()
+
+    # El archivo sigue en el disco, byte a byte.
+    assert ruta.exists() and ruta.read_text(encoding="utf-8") == VECTOR
+    # El estado de sesion queda vacio y las comparativas intactas.
+    assert app.st.session_state[app.PRINCIPAL_KEY] is None
+    assert app.st.session_state["script_nombre"] == ""
+    assert app.st.session_state[app.COMPARE_KEY] == ["a.py"]
+    # Y no queda ningun resultado de la Principal que se quitaba.
+    assert app.RESULT_KEY not in app.st.session_state
+
+
+def test_sin_principal_el_backtest_no_se_ejecuta(monkeypatch):
+    """Sin Principal el laboratorio espera: no corre ni la anterior ni ningun archivo."""
+    monkeypatch.setitem(app.st.session_state, app.PRINCIPAL_KEY, None)
+    ejecutadas = []
+    monkeypatch.setattr(app, "run_strategy_backtest", lambda *a, **k: ejecutadas.append(a))
+
+    df, metrics = app.get_backtest_result("TSLA", 100_000.0)
+
+    assert ejecutadas == []
+    assert metrics["standby"] is True
+    assert metrics["equity"] == 100_000.0
+    assert list(df.columns) == ["Equity", "Benchmark", "Drawdown", "Position"]
+
+
+def test_sin_principal_no_se_toca_la_cache_de_una_ejecucion_anterior(monkeypatch):
+    """Quitar la Principal invalida su resultado: no puede reaparecer al reejecutar."""
+    monkeypatch.setitem(app.st.session_state, app.PRINCIPAL_KEY, "vector.py")
+    monkeypatch.setitem(app.st.session_state, app.RESULT_KEY, {"df": None, "metrics": {}})
+    monkeypatch.setitem(app.st.session_state, app.PARAMS_KEY, ("vector.py", "TSLA", (), 1.0))
+
+    app.clear_principal_strategy()
+
+    assert app.RESULT_KEY not in app.st.session_state
+    assert app.PARAMS_KEY not in app.st.session_state

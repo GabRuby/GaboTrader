@@ -30,3 +30,12 @@ venv.bak/
 .DS_Store
 Thumbs.db
 *.log
+# Respaldos locales: conservar en el equipo, no publicar
+app.py.backup*
+*.backup_*
+
+# Archivos temporales locales
+respuesta.txt
+
+# Archivos de configuración local de Streamlit
+.streamlit/config.toml

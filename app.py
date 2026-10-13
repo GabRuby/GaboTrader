@@ -1,14 +1,17 @@
-﻿import ast
+import ast
+import importlib.util
 import os
 import re
 import sys
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from plotly.subplots import make_subplots
 
@@ -18,13 +21,82 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
 # Configuración de página ancha estilo IDE
 st.set_page_config(
-    page_title="QuantLab IDE - Trading Strategy Evaluator",
+    page_title="GABO trader LAB",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # Streamlit accepts an integer here as the initial sidebar width in pixels.
+    initial_sidebar_state=200,
 )
 
 ENGINE_VERSION = "v18142"
+WORKSPACE_TABS = (
+    "INICIO",
+    "LABORATORIO",
+    "PATRONES Y DESCUBRIMIENTO",
+    "PORTAFOLIO",
+    "RESULTADOS Y ANÁLISIS",
+    "HISTORIAL Y EXPERIMENTOS",
+)
+WORKSPACE_STATE_VERSION = 3
+ASSISTANT_MODE_KEY = "global_assistant_mode"
+ASSISTANT_MODE_GLOBAL = "global"
+ASSISTANT_MODE_CREATE_STRATEGY = "crear_estrategia"
+STRATEGY_CREATION_MESSAGES_KEY = "strategy_creation_messages"
+STRATEGY_CREATION_PROCESSING_KEY = "strategy_creation_processing"
+STRATEGY_CREATION_ERROR_KEY = "strategy_creation_error"
+STRATEGY_CREATION_NOTICE_KEY = "strategy_creation_notice"
+STRATEGY_CREATION_RULES_KEY = "strategy_creation_rules_state"
+STRATEGY_CREATION_INPUT_KEY = "strategy_creation_input"
+STRATEGY_CREATION_PROPOSAL_INPUT_KEY = "strategy_creation_proposal_input"
+STRATEGY_CREATION_PHASE_KEY = "strategy_creation_phase"
+STRATEGY_CREATION_CODE_KEY = "strategy_creation_code"
+STRATEGY_CREATION_PHASE_DESIGN = "diseno_reglas"
+STRATEGY_CREATION_PHASE_PROPOSAL_PENDING = "propuesta_pendiente_aprobacion"
+STRATEGY_CREATION_PHASE_CODE_AUTHORIZED = "codigo_autorizado"
+STRATEGY_CREATION_PHASE_CODE_PENDING_VALIDATION = "codigo_pendiente_validacion"
+STRATEGY_CREATION_FILENAME_KEY = "strategy_creation_filename"
+STRATEGY_CREATION_VALIDATION_KEY = "strategy_creation_validation"
+STRATEGY_CREATION_CODE_EDITOR_KEY = "strategy_creation_code_editor"
+STRATEGY_CREATION_SAVED_PATH_KEY = "strategy_creation_saved_path"
+STRATEGY_CREATION_SAVED_CODE_KEY = "strategy_creation_saved_code"
+STRATEGY_CREATION_CODE_STALE_KEY = "strategy_creation_code_stale"
+# Migrate earlier workspaces to Inicio once without resetting their strategy state.
+if st.session_state.get("workspace_state_version") != WORKSPACE_STATE_VERSION:
+    st.session_state["workspace_tab"] = WORKSPACE_TABS[0]
+    st.session_state["workspace_state_version"] = WORKSPACE_STATE_VERSION
+st.session_state.setdefault("assistant_panel_ratio", 0.19)
+st.session_state.setdefault("assistant_panel_width_px", None)
+st.session_state.setdefault(ASSISTANT_MODE_KEY, ASSISTANT_MODE_GLOBAL)
+st.session_state.setdefault(STRATEGY_CREATION_MESSAGES_KEY, [])
+st.session_state.setdefault(STRATEGY_CREATION_PROCESSING_KEY, False)
+st.session_state.setdefault(STRATEGY_CREATION_ERROR_KEY, None)
+st.session_state.setdefault(STRATEGY_CREATION_NOTICE_KEY, None)
+st.session_state.setdefault(STRATEGY_CREATION_PHASE_KEY, STRATEGY_CREATION_PHASE_DESIGN)
+st.session_state.setdefault(STRATEGY_CREATION_CODE_KEY, None)
+st.session_state.setdefault(STRATEGY_CREATION_FILENAME_KEY, "estrategia_nueva.py")
+st.session_state.setdefault(STRATEGY_CREATION_VALIDATION_KEY, None)
+st.session_state.setdefault(STRATEGY_CREATION_CODE_EDITOR_KEY, "")
+st.session_state.setdefault(STRATEGY_CREATION_SAVED_PATH_KEY, None)
+st.session_state.setdefault(STRATEGY_CREATION_SAVED_CODE_KEY, None)
+st.session_state.setdefault(STRATEGY_CREATION_CODE_STALE_KEY, False)
+st.session_state.setdefault(
+    STRATEGY_CREATION_RULES_KEY,
+    {"proposal": None, "approved": False},
+)
+
+_panel_resizer = components.declare_component(
+    "gabo_panel_resizer",
+    path=str(Path(__file__).resolve().parent / "ui_components" / "panel_resizer"),
+)
+
+
+def normalize_assistant_panel_ratio(value) -> float:
+    """Keep the right pane bounded so a useful central workspace always remains."""
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return 0.19
+    return min(0.375, max(0.125, ratio))
 
 # -----------------------------------------------------------------------------
 # CONSTANTES: PROMPT DEL ANALISTA DE RIESGO CUANTITATIVO
@@ -82,18 +154,17 @@ st.markdown(
     }
     .stApp { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
 
-    /* Ocultar barra de estado y menús nativos de Streamlit */
-    #MainMenu, footer, #header, header,
-    [data-testid="stHeader"], [data-testid="stToolbar"],
+    /* Ocultar menús nativos sin bloquear los divisores redimensionables */
+    #MainMenu, footer, [data-testid="stToolbar"],
     [data-testid="stDecoration"], [data-testid="stStatusWidget"] {
         display: none !important;
     }
 
     .block-container {
-        padding: 0.9rem 1.1rem 1.2rem 1.1rem;
+        padding: 3.25rem 1.1rem 0.5rem 1.1rem;
         max-width: 100%;
     }
-    #MainMenu, footer, [data-testid="stSidebarCollapseButton"] { visibility: hidden; }
+    #MainMenu, footer { visibility: hidden; }
 
     /* Tipografía */
     .stMarkdown h1, .stMarkdown h2, .stMarkdown h3,
@@ -104,6 +175,7 @@ st.markdown(
     .topbar {
         display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
         background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+        box-sizing: border-box; min-width: 0;
         padding: 9px 14px; margin-bottom: 10px;
     }
     .topbar .brand { font-size: 14px; font-weight: 700; color: #0f172a; letter-spacing: .06em; }
@@ -112,46 +184,340 @@ st.markdown(
         background: #ffffff; border: 1px solid #cbd5e1; border-radius: 999px;
         padding: 3px 10px; font-family: 'Cascadia Mono', 'Courier New', monospace;
     }
-    .topbar .badge.live { color: #15803d; border-color: #86efac; background: #f0fdf4; }
     .topbar .spacer { margin-left: auto; }
     .topbar.topbar-right { justify-content: flex-end; margin-bottom: 0; }
-    .topbar .badge.ai { color: #6d28d9; border-color: #c4b5fd; background: #f5f3ff; }
+    .lab-context {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+        padding: 8px 10px; margin-bottom: 10px;
+        border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc;
+    }
+    .lab-context .badge {
+        display: inline-flex; font-size: 11px; font-weight: 600; color: #475569;
+        background: #ffffff; border: 1px solid #cbd5e1; border-radius: 999px;
+        padding: 3px 10px;
+    }
+    .lab-context .badge.status.waiting { color: #92400e; border-color: #fcd34d; background: #fffbeb; }
+    .lab-context .badge.status.error { color: #b91c1c; border-color: #fca5a5; background: #fef2f2; }
+    .lab-context .badge.status.ready { color: #166534; border-color: #86efac; background: #f0fdf4; }
+    [data-testid="stRadio"] [role="radiogroup"] { gap: 4px; flex-wrap: wrap; }
+    [data-testid="stRadio"] label {
+        padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 8px;
+        background: #f8fafc; font-size: 12px; font-weight: 600;
+    }
+    [data-testid="stRadio"] label:has(input:checked) {
+        color: #1d4ed8; border-color: #93c5fd; background: #eff6ff;
+    }
+    .st-key-workspace-layout [data-testid="stHorizontalBlock"] {
+        align-items: stretch;
+    }
+    .st-key-workspace-layout [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+    }
+    .workspace-empty {
+        border: 1px dashed #cbd5e1; border-radius: 12px; background: #f8fafc;
+        padding: 28px; color: #64748b; text-align: center;
+    }
+    .workspace-card {
+        min-height: 110px; padding: 16px; border: 1px solid #e2e8f0;
+        border-radius: 10px; background: #ffffff;
+    }
+    .workspace-card strong { color: #0f172a; }
+    .pattern-status {
+        display: inline-flex; margin: 4px 5px 4px 0; padding: 5px 8px;
+        border: 1px solid; border-radius: 999px; font-size: 11px; font-weight: 600;
+    }
+    .pattern-status.pending { color: #92400e; border-color: #fcd34d; background: #fffbeb; }
+    .pattern-status.research { color: #1d4ed8; border-color: #93c5fd; background: #eff6ff; }
+    .pattern-status.validated { color: #15803d; border-color: #86efac; background: #f0fdf4; }
+    .pattern-status.expired { color: #64748b; border-color: #cbd5e1; background: #f8fafc; }
 
     /* Popover 🤖 del header: debe ocupar la celda completa para alinearse con la barra */
     [data-testid="stPopover"] > button { width: 100%; height: 38px; }
 
-    /* Gestor de estrategias: principal ⭐ y comparativas [x] */
-    .strategy-row {
-        display: flex; align-items: center; gap: 8px;
-        padding: 10px 11px; margin-bottom: 6px;
-        border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff;
-    }
-    .strategy-row.principal {
-        border-color: #fcd34d; background: #fffbeb;
-        box-shadow: inset 3px 0 0 #f59e0b;
-    }
-    .strategy-row .star { font-size: 15px; line-height: 1; }
-    .strategy-row .strategy-name {
-        flex: 1; font-size: 12.5px; font-weight: 600; color: #0f172a;
-        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    .strategy-row .strategy-tag {
-        font-size: 9.5px; font-weight: 700; letter-spacing: .06em;
-        color: #b45309; background: #fef3c7; border: 1px solid #fcd34d;
-        border-radius: 999px; padding: 1px 7px;
-    }
+    /* Subtítulo de cada bloque del gestor (apertura / Principal) */
     .strategy-subtitle {
         font-size: 10.5px; font-weight: 700; letter-spacing: .05em;
-        color: #64748b; margin: 10px 0 6px;
+        color: #64748b; margin: 12px 0 6px;
     }
 
-    /* G.3.6 · Grupo 1 (ESTRATEGIAS): el botón de apertura y la fila de la Principal
-       van separados por un subtítulo y respiran con altura mínima, para que el grupo
-       se lea de un vistazo en vez de quedar prensado en dos líneas. */
-    .st-key-grp_estrategias [data-testid="stExpanderDetails"] {
-        padding: 10px 12px 12px; min-height: 150px;
+    /* G.3.7 · Grupo 1 (ESTRATEGIAS): la Principal vive en una tarjeta compacta y,
+       cuando no hay ninguna, la tarjeta se sustituye por su estado vacío. El borde
+       ámbar es el mismo acento que usaba la fila anterior, así que el color no cambia:
+       solo se deja de pintar la etiqueta «PRINCIPAL», que repetía el subtítulo. */
+    .principal-card {
+        display: flex; align-items: flex-start; gap: 8px;
+        min-height: 42px; padding: 9px 10px;
+        border: 1px solid #fcd34d; border-radius: 8px; background: #fffbeb;
+        box-shadow: inset 3px 0 0 #f59e0b;
     }
-    .st-key-grp_estrategias .stButton button { min-height: 38px; }
+    .principal-card .card-icon { flex: 0 0 auto; font-size: 14px; line-height: 1.35; }
+    .principal-card .strategy-name {
+        flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; line-height: 1.35;
+        color: #0f172a; overflow-wrap: break-word; word-break: normal; white-space: normal;
+    }
+    .principal-card.empty {
+        align-items: center; justify-content: center; min-height: 40px; padding: 9px 10px;
+        border: 1px dashed #cbd5e1; background: #f8fafc; box-shadow: none;
+        color: #94a3b8; font-size: 11.5px; font-weight: 600; text-align: center;
+    }
+    /* El 🗑️ va a la altura de la tarjeta para que la fila se lea como un bloque. */
+
+
+    .st-key-grp_estrategias .stButton button { min-height: 36px; }
+
+    .st-key-grp_estrategias .st-key-btn_open_strategy {
+        width: fit-content; margin: 0 0 8px;
+    }
+    .st-key-grp_estrategias .st-key-btn_open_strategy button {
+        min-height: 30px; height: 30px; width: auto; padding: 0 9px;
+        border: 1px solid #16a34a; border-radius: 7px;
+        background: #22c55e; color: #ffffff; font-size: 11px; line-height: 1;
+    }
+    .st-key-grp_estrategias .st-key-btn_open_strategy button:hover,
+    .st-key-grp_estrategias .st-key-btn_open_strategy button:focus-visible {
+        background: #16a34a; border-color: #15803d; color: #ffffff;
+    }
+    .st-key-strategy_creation_activate button {
+        min-height: 34px; border-color: #7c3aed; background: #f5f3ff;
+        color: #5b21b6; font-size: 12px;
+    }
+    .st-key-strategy_creation_activate button:hover,
+    .st-key-strategy_creation_activate button:focus-visible {
+        border-color: #6d28d9; background: #ede9fe; color: #4c1d95;
+    }
+
+    /* Fila de Estrategia Principal: tarjeta flexible y bot?n fijo. */
+    .st-key-principal-strategy-row {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+    }
+    .st-key-principal-strategy-row [data-testid="stHorizontalBlock"] {
+        display: flex;
+        align-items: center;
+        flex-wrap: nowrap;
+        gap: 8px;
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+    }
+    .st-key-principal-strategy-row [data-testid="stHorizontalBlock"] > [data-testid="column"]:first-child {
+        flex: 1 1 0% !important;
+        width: 0 !important;
+        max-width: none !important;
+        min-width: 0 !important;
+        box-sizing: border-box;
+    }
+    .st-key-principal-strategy-row [data-testid="stHorizontalBlock"] > [data-testid="column"]:last-child {
+        flex: 0 0 42px !important;
+        width: 42px !important;
+        max-width: 42px !important;
+        min-width: 42px !important;
+        box-sizing: border-box;
+    }
+    .st-key-principal-strategy-row .principal-card {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        min-width: 0;
+        min-height: 42px;
+        padding: 8px 10px;
+        box-sizing: border-box;
+        border: 1px solid #fcd34d;
+        border-radius: 8px;
+        background: #fffbeb;
+        box-shadow: inset 3px 0 0 #f59e0b;
+    }
+    .st-key-principal-strategy-row .principal-card .card-icon {
+        flex: 0 0 auto;
+        font-size: 14px;
+        line-height: 1.35;
+    }
+    .st-key-principal-strategy-row .principal-card .strategy-name {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-size: 12.5px;
+        font-weight: 600;
+        line-height: 1.35;
+        color: #0f172a;
+        overflow-wrap: anywhere;
+        word-break: normal;
+        white-space: normal;
+    }
+    .st-key-principal-strategy-row .principal-card.empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-width: 0;
+        min-height: 42px;
+        padding: 8px;
+        box-sizing: border-box;
+        border: 1px dashed #cbd5e1;
+        border-radius: 8px;
+        background: #f8fafc;
+        box-shadow: none;
+        color: #64748b;
+        font-size: 11px;
+        font-weight: 500;
+        line-height: 1.3;
+        text-align: center;
+        overflow-wrap: anywhere;
+    }
+    /* Eliminar la Principal solo cambia el estado, no borra el archivo. */
+    .st-key-btn_quitar_principal button {
+        min-width: 38px; min-height: 38px; height: 38px; padding: 0;
+        border: 1px solid #dc2626; border-radius: 8px;
+        background: #fee2e2; color: #991b1b; font-size: 16px; line-height: 1;
+    }
+    .st-key-btn_quitar_principal button:hover,
+    .st-key-btn_quitar_principal button:focus-visible {
+        background: #fecaca; border-color: #b91c1c; color: #7f1d1d;
+    }
+    .st-key-grp_estrategias [data-testid="stExpanderDetails"] {
+        padding: 14px 14px 16px;
+    }
+
+    /* Bot?n + del expander PRUEBA */
+    .st-key-grp_prueba .st-key-btn_prueba_abrir_estrategia button {
+        box-sizing: border-box;
+        width: 100%;
+        min-width: 0;
+        height: 42px;
+        min-height: 42px;
+        padding: 0;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #f8fafc;
+        color: #16a34a;
+        font-size: 25px;
+        font-weight: 400;
+        line-height: 1;
+        box-shadow: none;
+    }
+
+    .st-key-grp_prueba .st-key-btn_prueba_abrir_estrategia button:hover {
+        border-color: #86efac;
+        background: #f0fdf4;
+        color: #15803d;
+    }
+
+    .st-key-grp_prueba .st-key-btn_prueba_abrir_estrategia button:focus-visible {
+        outline: 2px solid #86efac;
+        outline-offset: 1px;
+    }
+
+    /* Fila de estrategia dentro de PRUEBA */
+    .st-key-grp_prueba [data-testid="stExpanderDetails"] {
+        padding: 12px 12px 14px !important;
+    }
+
+    .st-key-grp_prueba [data-testid="stHorizontalBlock"] {
+        align-items: center !important;
+        flex-wrap: nowrap !important;
+        gap: 8px !important;
+    }
+
+    .st-key-grp_prueba [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        min-width: 0 !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    .st-key-grp_prueba [data-testid="stHorizontalBlock"] > [data-testid="column"] > div {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .st-key-grp_prueba .st-key-btn_prueba_abrir_estrategia,
+    .st-key-grp_prueba .st-key-btn_prueba_quitar_principal {
+        width: 42px !important;
+        min-width: 42px !important;
+        flex: 0 0 42px !important;
+        margin: 0 !important;
+    }
+
+    .st-key-grp_prueba .st-key-btn_prueba_abrir_estrategia button,
+    .st-key-grp_prueba .st-key-btn_prueba_quitar_principal button {
+        box-sizing: border-box;
+        width: 42px !important;
+        min-width: 42px !important;
+        height: 42px !important;
+        min-height: 42px !important;
+        padding: 0 !important;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+    }
+
+    .st-key-grp_prueba .st-key-btn_prueba_abrir_estrategia button {
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #f8fafc;
+        color: #16a34a;
+        font-size: 20px;
+        box-shadow: none;
+    }
+
+    .st-key-grp_prueba .st-key-btn_prueba_quitar_principal button {
+        border: 1px solid #dc2626;
+        border-radius: 8px;
+        background: #fee2e2;
+        color: #991b1b;
+        font-size: 17px;
+        box-shadow: none;
+    }
+
+    .st-key-grp_prueba .st-key-btn_prueba_quitar_principal button:hover {
+        background: #fecaca;
+        border-color: #b91c1c;
+        color: #7f1d1d;
+    }
+
+    .st-key-principal-prototype {
+        margin-top: 10px; padding: 8px; border: 1px solid #94a3b8;
+        border-radius: 8px; background: #f8fafc; container-type: inline-size;
+    }
+    .principal-prototype-heading {
+        margin-bottom: 8px; color: #334155; font-size: 10px;
+        font-weight: 800; letter-spacing: .06em;
+    }
+    .principal-prototype-row {
+        display: grid; grid-template-columns: minmax(0, 1fr) 44px;
+        align-items: start; gap: 8px; min-width: 0;
+    }
+    .principal-prototype-value {
+        box-sizing: border-box; width: 100%; min-height: 42px; padding: 6px 8px;
+        border: 1px solid #cbd5e1; border-radius: 8px; background: #ffffff;
+        color: #0f172a; font-size: 12.5px; font-weight: 600; line-height: 1.4;
+        overflow-wrap: break-word;
+    }
+    .principal-prototype-value.empty {
+        padding: 6px 4px; border-style: dashed; color: #64748b; font-size: 10px;
+        font-weight: 500; line-height: 1.25; text-align: center;
+    }
+    .principal-prototype-delete {
+        box-sizing: border-box; width: 44px; min-width: 44px; height: 42px; min-height: 42px;
+        border: 1px solid #b91c1c; border-radius: 8px;
+        background: #dc2626; color: #ffffff; font-size: 17px; line-height: 1;
+        cursor: default;
+    }
+    .principal-prototype-delete:hover,
+    .principal-prototype-delete:focus-visible {
+        border-color: #991b1b; background: #b91c1c; color: #ffffff;
+    }
+    /* PRUEBA TEMPORAL: desactivar el cambio de columnas por ancho.
+    @container (max-width: 180px) {
+        .principal-prototype-row { grid-template-columns: minmax(0, 1fr); }
+        .principal-prototype-delete { justify-self: end; }
+    }
+    */
 
     /* G.3.6 · Grupo 2 (ESTRATEGIAS A COMPARAR): dos huecos de altura fija. Los
        vacíos son un marco discontinuo con la pista de lo que irá ahí; los llenos
@@ -261,8 +627,25 @@ st.markdown(
     .t-key  { color: #f8fafc; }
     .t-dim  { color: #94a3b8; }
 
-    /* Sidebar claro */
-    [data-testid="stSidebar"] { background: #f1f5f9; border-right: 1px solid #e2e8f0; }
+    /* Sidebar nativo de Streamlit: su divisor lateral conserva el arrastre nativo. */
+    section[data-testid="stSidebar"] {
+        width: 12.5vw;
+        min-width: clamp(160px, 12.5vw, 280px);
+        max-width: min(37.5vw, calc(100vw - 680px));
+        background: #f1f5f9;
+        border-right: 1px solid #e2e8f0;
+    }
+    [data-testid="stSidebarResizeHandle"],
+    [data-testid="stSidebarResizer"],
+    [data-testid="stSidebar"] [role="separator"] {
+        width: 12px !important;
+        cursor: col-resize !important;
+    }
+    [data-testid="stSidebarResizeHandle"]:hover,
+    [data-testid="stSidebar"] [data-testid="stSidebarResizer"]:hover,
+    [data-testid="stSidebar"] [role="separator"]:hover {
+        background: rgba(37, 99, 235, 0.12);
+    }
     [data-testid="stSidebar"] .block-container { padding-top: 0.6rem; }
     [data-testid="stSidebarUserContent"] .block-container { padding-left: 1rem; padding-right: 1rem; }
 
@@ -296,6 +679,16 @@ st.markdown(
     }
     .stButton button[kind="primary"]:hover { background: #1d4ed8; border-color: #1e40af; }
     hr { border-color: #e2e8f0; }
+
+    @media (max-width: 800px) {
+        .block-container { padding: 3.25rem 0.6rem 0.5rem; }
+        [data-testid="stRadio"] label { padding: 4px 6px; font-size: 10px; }
+        section[data-testid="stSidebar"] {
+            width: min(72vw, 280px);
+            min-width: 180px;
+            max-width: min(72vw, 37.5vw);
+        }
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -342,12 +735,150 @@ def list_strategy_files(folder: Path) -> list[str]:
         return []
 
 
+def is_valid_strategy_filename(filename: str) -> bool:
+    """Accept a single Python filename, never a path or the application module."""
+    return bool(
+        isinstance(filename, str)
+        and filename.endswith(".py")
+        and filename.casefold() != "app.py"
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]*\.py", filename)
+    )
+
+
+def validate_strategy_source(source: str, filename: str = "estrategia.py") -> dict:
+    """Validate syntax and the project's declared strategy entry point without execution."""
+    errors = []
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as exc:
+        return {
+            "valid": False,
+            "dialect": strategy_parser.DIALECTO_NINGUNO,
+            "errors": [f"Error de sintaxis en línea {exc.lineno}: {exc.msg}"],
+        }
+
+    info = strategy_parser.analizar_fuente(source, nombre=filename)
+    if not info.valido:
+        errors.append(info.error or "El archivo no expone una interfaz de estrategia reconocida.")
+    elif info.dialecto == strategy_parser.DIALECTO_VECTOR:
+        entry = next(
+            (
+                node for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "run_strategy"
+            ),
+            None,
+        )
+        positional = (
+            list(entry.args.posonlyargs) + list(entry.args.args)
+            if entry is not None else []
+        )
+        if not positional:
+            errors.append("`run_strategy` debe aceptar el DataFrame de entrada como primer argumento.")
+        if entry is not None and not any(
+            isinstance(node, ast.Return) for node in ast.walk(entry)
+        ):
+            errors.append("`run_strategy` debe devolver el DataFrame procesado.")
+    elif info.dialecto == strategy_parser.DIALECTO_LEAN:
+        algorithm_classes = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and any(
+                (isinstance(base, ast.Name) and base.id == "QCAlgorithm")
+                or (isinstance(base, ast.Attribute) and base.attr == "QCAlgorithm")
+                for base in node.bases
+            )
+        ]
+        if not any(
+            any(
+                isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and member.name == "initialize"
+                for member in algorithm.body
+            )
+            for algorithm in algorithm_classes
+        ):
+            errors.append("La clase `QCAlgorithm` debe implementar `initialize`.")
+
+    for node in ast.walk(tree):
+        roots = []
+        if isinstance(node, ast.Import):
+            roots.extend(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.append(node.module.split(".", 1)[0])
+        for root in roots:
+            if root == "AlgorithmImports" and info.dialecto == strategy_parser.DIALECTO_LEAN:
+                continue
+            if root in getattr(sys, "stdlib_module_names", set()) or root in sys.modules:
+                continue
+            try:
+                available = importlib.util.find_spec(root) is not None
+            except (ImportError, ValueError, ModuleNotFoundError):
+                available = False
+            if not available:
+                errors.append(
+                    f"Dependencia no disponible para importar estáticamente: `{root}`."
+                )
+
+    return {
+        "valid": not errors,
+        "dialect": info.dialecto,
+        "errors": list(dict.fromkeys(errors)),
+    }
+
+
+def save_strategy_source(base: Path, filename: str, source: str) -> Path:
+    """Create a validated strategy file exclusively; never overwrite an existing file."""
+    if not is_valid_strategy_filename(filename):
+        raise ValueError("El nombre debe ser un único archivo Python válido terminado en `.py`.")
+    target = base / filename
+    if target.exists():
+        raise FileExistsError(f"El archivo ya existe: {target}")
+    validation = validate_strategy_source(source, filename)
+    if not validation["valid"]:
+        raise ValueError("El código no cumple el contrato estático: " + " ".join(validation["errors"]))
+
+    created = False
+    try:
+        with target.open("x", encoding="utf-8", newline="\n") as strategy_file:
+            created = True
+            strategy_file.write(source)
+    except OSError as write_error:
+        if created:
+            try:
+                target.unlink()
+            except OSError as cleanup_error:
+                raise OSError(
+                    f"No se pudo escribir el archivo: {write_error}. "
+                    f"El archivo parcial `{target}` tampoco pudo eliminarse: {cleanup_error}"
+                ) from write_error
+        raise
+    return target
+
+
+def register_strategy_file(path: Path, base: Path, available: list[str]) -> str:
+    """Refresh in-memory strategy lists after a successful file creation."""
+    relative = path.relative_to(base).as_posix()
+    if relative not in available:
+        available.append(relative)
+        available.sort(key=str.lower)
+    if path.parent == base and path.name not in py_files:
+        py_files.append(path.name)
+        py_files.sort(key=str.lower)
+    return relative
+
+
+# Texto que ve el editor cuando no hay ninguna Estrategia Principal: el mismo que ya
+# usaba como reserva `read_script_source`, ahora compartido con el estado vacío.
+SIN_ESTRATEGIA = "# Nueva estrategia\n"
+SIN_ESTRATEGIA_NOMBRE = "(sin Estrategia Principal)"
+
+
 def read_script_source(rel_path: str) -> str:
     """Lee el código de una estrategia (ruta relativa a BASE_DIR)."""
     try:
         return (BASE_DIR / rel_path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError, ValueError):
-        return DEFAULT_STRATEGIES.get(rel_path, "# Nueva estrategia\n")
+        return DEFAULT_STRATEGIES.get(rel_path, SIN_ESTRATEGIA)
 
 
 # -----------------------------------------------------------------------------
@@ -411,19 +942,22 @@ def list_all_strategies(base: Path) -> list[str]:
 
 
 def ensure_strategy_state(available: list[str]) -> None:
-    """Normaliza el estado de principal/comparativas contra el catálogo real."""
-    if not available:
-        return
+    """Normaliza el estado de principal/comparativas contra el catálogo real.
 
+    La Estrategia Principal NO se rellena sola: si no hay ninguna, o si el archivo
+    que lo era ya no está en el proyecto, el estado es vacío (`None`). El laboratorio
+    espera a que el usuario abra una estrategia con «📂 Abrir Estrategia».
+    """
     principal = st.session_state.get(PRINCIPAL_KEY)
-    if principal not in available:
-        st.session_state[PRINCIPAL_KEY] = available[0]
+    if principal is not None and principal not in available:
+        principal = None
+    st.session_state[PRINCIPAL_KEY] = principal
 
-    # Nunca comparar la principal contra sí misma, ni dejar más de MAX_COMPARATIVES.
+    # Nunca comparar la principal contra sí misma, ni dejar más de MAX_COMPARATIVAS.
     keep = [
         script
         for script in (st.session_state.get(COMPARE_KEY) or [])
-        if script in available and script != st.session_state[PRINCIPAL_KEY]
+        if script in available and script != principal
     ]
     st.session_state[COMPARE_KEY] = keep[-MAX_COMPARATIVES:]
 
@@ -462,6 +996,41 @@ def set_principal_strategy(script: str, available: list[str]) -> None:
     st.session_state.pop("bt_ai_auto_done", None)
     st.session_state.pop("force_run", None)
     st.session_state["flash_msg"] = f"⭐ `{script}` es ahora la Estrategia Principal"
+
+
+def clear_principal_strategy() -> None:
+    """Quita la Estrategia Principal y devuelve el grupo ESTRATEGIAS al estado vacío.
+
+    NO borra ni toca el archivo `.py` del proyecto: el bote de basura del grupo 1 solo
+    deshace la asignación en memoria. Las comparativas tampoco se tocan (comparar no
+    depende de tener Principal) y el editor solo se suelta lo justo para que no quede
+    una Principal activa detrás del grupo.
+    """
+    # El nombre se guarda antes de limpiar el estado, para poder confirmar en el aviso
+    # que estrategia deja de ser la Principal (y que su archivo sigue ahí).
+    principal = st.session_state.get(PRINCIPAL_KEY)
+    st.session_state[PRINCIPAL_KEY] = None
+    st.session_state["script_nombre"] = ""
+    st.session_state["script_selector"] = ""
+    st.session_state["codigo_actual"] = SIN_ESTRATEGIA
+    st.session_state["codigo_actual_script"] = ""
+    st.session_state["editor_loaded_for"] = None
+    # El resultado, el borrador y el análisis de IA pertenecían a la Principal que
+    # acaba de irse: se limpian igual que al cambiar de estrategia, para que nada de
+    # lo anterior pueda aparecer como si fuera de la siguiente.
+    st.session_state.pop(RESULT_KEY, None)
+    st.session_state.pop(PARAMS_KEY, None)
+    for key in (DRAFT_KEY, DRAFT_META_KEY, DRAFT_RESULT_KEY, DRAFT_METRICS_KEY, DRAFT_EQUITY_KEY):
+        st.session_state.pop(key, None)
+    st.session_state.pop(DRAFT_SEEDED_KEY, None)
+    st.session_state.pop("bt_ai_report", None)
+    st.session_state.pop("bt_ai_auto_done", None)
+    st.session_state.pop("force_run", None)
+    st.session_state["flash_msg"] = (
+        f"🗑️ `{principal}` deja de ser la Estrategia Principal · su archivo sigue en el proyecto"
+        if principal
+        else "🗑️ Sin Estrategia Principal · el archivo sigue en el proyecto"
+    )
 
 
 def add_comparative_strategy(script: str, available: list[str]) -> tuple[bool, str]:
@@ -602,14 +1171,15 @@ py_files = list_strategy_files(BASE_DIR) or list(DEFAULT_STRATEGIES.keys())
 
 # Sesión: script activo y código cargado en el editor
 if "script_nombre" not in st.session_state:
-    st.session_state["script_nombre"] = py_files[0]
-if st.session_state["script_nombre"] not in py_files:
+    st.session_state["script_nombre"] = ""
+if st.session_state["script_nombre"] and st.session_state["script_nombre"] not in py_files:
     py_files.append(st.session_state["script_nombre"])
 
-# Catálogo completo (raíz + subcarpetas) para el gestor Principal vs Comparativas
+# Catálogo completo (raíz + subcarpetas) para el gestor Principal vs Comparativas.
+# El Grupo 1 arranca VACÍO a propósito: no se promueve ningún archivo por defecto, ni
+# siquiera el primero que aparece en el proyecto. La Principal se elige con
+# «📂 Abrir Estrategia» y se puede quitar con su 🗑️ sin tocar el archivo.
 ALL_STRATEGIES = list_all_strategies(BASE_DIR) or list(py_files)
-if st.session_state["script_nombre"] in ALL_STRATEGIES:
-    st.session_state.setdefault(PRINCIPAL_KEY, st.session_state["script_nombre"])
 ensure_strategy_state(ALL_STRATEGIES)
 
 # Snapshot estático de referencia si el servidor está en entorno sin red
@@ -822,6 +1392,44 @@ RESULT_KEY = "backtest_result"
 PARAMS_KEY = "backtest_params"
 
 
+def resultado_en_espera(ticker, capital):
+    """Curva plana y métricas a cero para cuando todavía no hay Estrategia Principal.
+
+    Trae las MISMAS claves que devuelve el motor, para que graficas, barra de KPIs y
+    tabla comparativa se puedan pintar sin excepciones. No lleva `error`: no es un
+    fallo del motor, es el laboratorio esperando a que se abra una estrategia.
+    """
+    capital = float(capital)
+    df = pd.DataFrame(
+        {
+            "Equity": [capital],
+            "Benchmark": [capital],
+            "Drawdown": [0.0],
+            "Position": [0.0],
+        },
+        index=pd.to_datetime([pd.Timestamp(datetime.now()).normalize()]),
+    )
+    metrics = {
+        "standby": True,
+        "equity": capital,
+        "total_return": 0.0,
+        "max_drawdown": 0.0,
+        "win_rate": 0.0,
+        "sharpe": 0.0,
+        "fees": 0.0,
+        "volume": 0.0,
+        "fills": 0,
+        "trades": 0,
+        "benchmark_return": 0.0,
+        "benchmark_drawdown": 0.0,
+        "bars": 0,
+        "ticker": ticker,
+        "capital": capital,
+        "source": "sin ejecutar",
+    }
+    return df, metrics
+
+
 def get_backtest_result(ticker, capital, force=False):
     """Resultado del backtest de la Estrategia Principal, cacheado por parámetros.
 
@@ -829,8 +1437,15 @@ def get_backtest_result(ticker, capital, force=False):
     que cualquier comparativa. Si el motor no puede ejecutarla se devuelve la curva y
     las metricas de referencia con el motivo en `error`, para que el panel siga
     operativo en lugar de dejar la app a medias.
+
+    Sin Estrategia Principal no se ejecuta NADA: ni la anterior, ni el primer archivo
+    del proyecto, ni uno inventado. Se devuelve el estado de espera y el laboratorio
+    espera a que el usuario abra una estrategia.
     """
-    script = st.session_state.get(PRINCIPAL_KEY) or (py_files[0] if py_files else "")
+    script = st.session_state.get(PRINCIPAL_KEY)
+    if not script:
+        return resultado_en_espera(ticker, capital)
+
     params = (script, ticker, _sello_parametros(), float(capital))
     cached = st.session_state.get(RESULT_KEY)
 
@@ -842,7 +1457,7 @@ def get_backtest_result(ticker, capital, force=False):
     except Exception as exc:
         df = pd.DataFrame({"Equity": [float(capital)], "Benchmark": [float(capital)],
                            "Drawdown": [0.0], "Position": [0.0]},
-                          index=pd.to_datetime([datetime.now().normalize()]))
+                          index=pd.to_datetime([pd.Timestamp.now().normalize()]))
         metrics = {**REFERENCE_SNAPSHOT, "error": str(exc), "source": "sin ejecutar", "bars": 1,
                    "ticker": ticker, "capital": float(capital), "sharpe": REFERENCE_SNAPSHOT["sharpe"]}
 
@@ -865,9 +1480,9 @@ OLLAMA_DEFAULT_HOST = "http://localhost:11434"
 OLLAMA_MODELS = ["llama3.1", "qwen2.5-coder", "codellama", "deepseek-coder-v2"]
 AI_TIMEOUT = 180
 
-# Prefijo de sesión del selector de IA global (popover 🤖 de la barra superior).
-# Cualquier consumidor lee esa misma selección con ai_config_from_state().
+# La configuración canónica de IA permanece bajo `hdr` para conservar las selecciones.
 TOPBAR_AI_PREFIX = "hdr"
+ASSISTANT_AI_PREFIX = "assistant_ai"
 
 AI_SYSTEM_PROMPT = """Eres un desarrollador senior especializado en QuantConnect, el Lean Engine de \
 QuantConnect y Python aplicado al trading algorítmico.
@@ -892,6 +1507,45 @@ Reglas estrictas:
 - No introduzcas dependencias externas que no estén ya importadas en el código original.
 - No inventes datos ni resultados de backtest.
 - Comenta brevemente cada decisión de riesgo o de señal que modifiques."""
+
+STRATEGY_CREATION_SYSTEM_PROMPT = """Eres un asistente cuantitativo que ayuda a diseñar estrategias
+mediante una conversación iterativa para simulación y backtesting. La estrategia puede ser de
+cualquier tipo compatible con el proyecto; no presupongas un nombre de archivo ni una estrategia
+concreta.
+
+Ayuda a definir, cuando resulte pertinente, el activo o universo, marco temporal, indicadores,
+entradas y salidas, stop loss y take profit, tamaño de posición y gestión del riesgo, parámetros
+ajustables, supuestos, limitaciones y datos necesarios para un backtest. No exijas que el usuario
+responda todo desde el inicio: pregunta de forma breve por los aspectos más importantes que falten.
+
+Resume las reglas acordadas en lenguaje claro, identifica lo que aún está pendiente y no afirmes
+rentabilidad ni validación sin evidencia. El frontend controla por separado la aprobación explícita
+de las reglas antes de solicitar código. Mientras no se autorice esa fase, no escribas Python ni
+bloques de código; si el usuario lo pide, indícale que primero debe proponer y aprobar las reglas.
+
+No ejecutes ni propongas como realizados backtests u órdenes. No afirmes que existe código validado.
+Si el usuario pide código antes de su autorización explícita, continúa aclarando reglas y explica
+que primero debe consolidar y aprobar la propuesta."""
+
+STRATEGY_CREATION_CONSOLIDATION_PROMPT = """Consolida la estrategia discutida en una especificación
+estructurada y editable. Incluye secciones para: objetivo y universo de activos; temporalidades y
+datos necesarios; condiciones de entrada y salida; indicadores y parámetros configurables; gestión
+del capital y del riesgo; supuestos; limitaciones; condiciones de invalidación; y datos pendientes.
+Identifica explícitamente como «Pendiente» cada elemento desconocido o ambiguo, sin inventar valores.
+No generes código ni afirmes validación o rentabilidad."""
+
+STRATEGY_CREATION_CODE_SYSTEM_PROMPT = """Cuando se habilite la etapa posterior de generación,
+prepara código Python completo para la estrategia genérica descrita por las reglas aprobadas y
+propón un nombre de archivo descriptivo terminado en `.py` en una línea `Archivo sugerido: ...`.
+Devuelve un único bloque ```python con el archivo completo y sin texto explicativo dentro del bloque.
+
+Usa únicamente uno de los contratos que ya reconoce el proyecto:
+- Vectorial: `def run_strategy(data, ...)` que devuelve un DataFrame de pandas, conserva `Close`
+  y proporciona `Signal` o `Position` como exposición objetivo.
+- LEAN: una clase que hereda de `QCAlgorithm`, con `initialize` y el callback de datos apropiado.
+No inventes APIs del motor. No añadas conexión a brokers, ejecución real, escritura automática de
+archivos ni modificaciones de motores existentes. No ejecutes ni afirmes validar el código, ni
+afirmes rentabilidad sin evidencia."""
 
 
 class AIError(Exception):
@@ -1001,6 +1655,28 @@ def extract_python_code(text: str) -> str | None:
     return max(blocks, key=len).strip()
 
 
+def extract_strategy_python_file(text: str) -> str | None:
+    """Extract the full Python fence without trimming the generated file contents."""
+    blocks = re.findall(r"```(?:python|py)\s*\r?\n(.*?)```", text, re.IGNORECASE | re.DOTALL)
+    return max(blocks, key=len) if blocks else None
+
+
+def suggested_strategy_filename(response: str, idea: str = "") -> str:
+    """Read the model's suggested filename or derive a safe name from the user's idea."""
+    match = re.search(
+        r"(?im)^\s*(?:archivo sugerido|nombre de archivo)\s*:\s*`?([^`\r\n]+)`?\s*$",
+        response,
+    )
+    candidate = match.group(1).strip().strip("\"'") if match else ""
+    if candidate and not candidate.endswith(".py"):
+        candidate = f"{candidate}.py"
+    if is_valid_strategy_filename(candidate):
+        return candidate
+
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", idea).strip("_").lower()[:48]
+    return f"{stem or 'estrategia_nueva'}.py"
+
+
 def is_valid_python(code: str) -> bool:
     try:
         compile(code, "<ia>", "exec")
@@ -1019,6 +1695,171 @@ def run_ai_request(prompt: str, config: dict, system_prompt: str = AI_SYSTEM_PRO
     return call_ollama(prompt, model, config.get("host") or "", system_prompt)
 
 
+def build_strategy_creation_prompt(messages: list[dict[str, str]]) -> str:
+    """Format the isolated strategy-design conversation for the configured provider."""
+    transcript = []
+    for message in messages:
+        role = "Usuario" if message.get("role") == "user" else "Asistente"
+        content = str(message.get("content", "")).strip()
+        if content:
+            transcript.append(f"{role}:\n{content}")
+    return "\n\n".join(transcript)
+
+
+def strategy_creation_response_is_code(response: str) -> bool:
+    """Identify likely source code without discarding the assistant's response."""
+    return bool(
+        re.search(r"```(?:python|py)\b", response, re.IGNORECASE)
+        or re.search(
+            r"(?m)^\s*(?:class\s+\w+\s*(?:\(|:)|def\s+\w+\s*\(|"
+            r"from\s+\w+\s+import\s+|import\s+\w+)",
+            response,
+        )
+    )
+
+
+def process_strategy_creation_message(
+    user_message: str, *, generate_code: bool = False, consolidate_rules: bool = False
+) -> None:
+    """Keep every assistant response in history; never execute or save generated code."""
+    message = user_message.strip()
+    if not message:
+        return
+
+    phase = st.session_state.get(
+        STRATEGY_CREATION_PHASE_KEY, STRATEGY_CREATION_PHASE_DESIGN
+    )
+    rules_state = st.session_state.get(STRATEGY_CREATION_RULES_KEY, {})
+    approved_proposal = str(rules_state.get("proposal") or "").strip()
+    rules_approval_valid = bool(
+        rules_state.get("approved")
+        and approved_proposal
+        and rules_state.get("approved_text") == approved_proposal
+        and not strategy_creation_response_is_code(approved_proposal)
+    )
+    if generate_code and (
+        phase != STRATEGY_CREATION_PHASE_CODE_AUTHORIZED or not rules_approval_valid
+    ):
+        st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+            "Aprueba primero las reglas conversadas para habilitar la generación."
+        )
+        return
+    if not generate_code and phase in (
+        STRATEGY_CREATION_PHASE_PROPOSAL_PENDING,
+        STRATEGY_CREATION_PHASE_CODE_AUTHORIZED,
+        STRATEGY_CREATION_PHASE_CODE_PENDING_VALIDATION,
+    ):
+        if phase == STRATEGY_CREATION_PHASE_CODE_PENDING_VALIDATION:
+            st.session_state[STRATEGY_CREATION_CODE_STALE_KEY] = True
+        phase = STRATEGY_CREATION_PHASE_DESIGN
+        st.session_state[STRATEGY_CREATION_PHASE_KEY] = phase
+        rules_state = dict(st.session_state.get(STRATEGY_CREATION_RULES_KEY, {}))
+        rules_state["approved"] = False
+        rules_state["approved_text"] = None
+        if not consolidate_rules:
+            rules_state["proposal"] = None
+        st.session_state[STRATEGY_CREATION_RULES_KEY] = rules_state
+
+    history = list(st.session_state.get(STRATEGY_CREATION_MESSAGES_KEY, []))
+    history.append({"role": "user", "content": message})
+    st.session_state[STRATEGY_CREATION_MESSAGES_KEY] = history
+    st.session_state[STRATEGY_CREATION_ERROR_KEY] = None
+    st.session_state[STRATEGY_CREATION_NOTICE_KEY] = None
+    st.session_state[STRATEGY_CREATION_PROCESSING_KEY] = True
+
+    try:
+        prompt = build_strategy_creation_prompt(history)
+        if generate_code:
+            prompt += (
+                "\n\nEspecificación exacta aprobada por el usuario; genera únicamente a partir "
+                "de esta versión:\n"
+                f"{approved_proposal}"
+            )
+        response = run_ai_request(
+            prompt,
+            ai_config_from_state(TOPBAR_AI_PREFIX),
+            STRATEGY_CREATION_CODE_SYSTEM_PROMPT if generate_code else
+            STRATEGY_CREATION_CONSOLIDATION_PROMPT if consolidate_rules else
+            STRATEGY_CREATION_SYSTEM_PROMPT,
+        )
+        response = str(response).strip()
+        if not response:
+            raise AIError("La IA devolvió una respuesta vacía. Puedes intentarlo de nuevo.")
+    except AIError as exc:
+        st.session_state[STRATEGY_CREATION_ERROR_KEY] = str(exc)
+    except Exception as exc:
+        st.session_state[STRATEGY_CREATION_ERROR_KEY] = (
+            f"No se pudo consultar el asistente: {type(exc).__name__}: {exc}"
+        )
+    else:
+        history.append({"role": "assistant", "content": response})
+        st.session_state[STRATEGY_CREATION_MESSAGES_KEY] = history
+        if consolidate_rules:
+            rules_state = dict(st.session_state.get(STRATEGY_CREATION_RULES_KEY, {}))
+            rules_state["proposal"] = response
+            rules_state["approved"] = False
+            rules_state["approved_text"] = None
+            st.session_state[STRATEGY_CREATION_RULES_KEY] = rules_state
+            st.session_state[STRATEGY_CREATION_PHASE_KEY] = (
+                STRATEGY_CREATION_PHASE_PROPOSAL_PENDING
+            )
+            st.session_state[STRATEGY_CREATION_PROPOSAL_INPUT_KEY] = response
+        if strategy_creation_response_is_code(response):
+            if generate_code and phase == STRATEGY_CREATION_PHASE_CODE_AUTHORIZED:
+                code = extract_strategy_python_file(response)
+                if code is None:
+                    code = response.strip()
+                filename = suggested_strategy_filename(
+                    response,
+                    next(
+                        (
+                            str(item.get("content", ""))
+                            for item in history
+                            if item.get("role") == "user"
+                        ),
+                        "",
+                    ),
+                )
+                validation = validate_strategy_source(code, filename)
+                st.session_state[STRATEGY_CREATION_CODE_KEY] = code
+                st.session_state[STRATEGY_CREATION_CODE_EDITOR_KEY] = code
+                st.session_state[STRATEGY_CREATION_FILENAME_KEY] = filename
+                st.session_state[STRATEGY_CREATION_VALIDATION_KEY] = validation
+                st.session_state[STRATEGY_CREATION_SAVED_PATH_KEY] = None
+                st.session_state[STRATEGY_CREATION_SAVED_CODE_KEY] = None
+                st.session_state[STRATEGY_CREATION_CODE_STALE_KEY] = False
+                st.session_state[STRATEGY_CREATION_PHASE_KEY] = (
+                    STRATEGY_CREATION_PHASE_CODE_PENDING_VALIDATION
+                )
+                if validation["valid"]:
+                    if not st.session_state.get(PRINCIPAL_KEY):
+                        st.session_state["codigo_actual"] = code
+                        st.session_state["codigo_actual_script"] = ""
+                        st.session_state["editor_loaded_for"] = None
+                    st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+                        "Código conservado. La validación estática del contrato del proyecto "
+                        "pasó; esto no demuestra su comportamiento ni rentabilidad. Aún no se "
+                        "guardó ni ejecutó."
+                    )
+                else:
+                    st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+                        "La respuesta se conservó, pero no se reconoce como una estrategia "
+                        "completa compatible. Revisa los errores de validación antes de guardarla."
+                    )
+            else:
+                st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+                    "La respuesta incluye código y se conservó en el historial. La generación "
+                    "solo queda autorizada después de aprobar explícitamente las reglas."
+                )
+        elif generate_code and phase == STRATEGY_CREATION_PHASE_CODE_AUTHORIZED:
+            st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+                "La respuesta se conservó en el chat, pero no contiene un archivo de estrategia "
+                "completo; no se presenta como una generación finalizada. Puedes volver a solicitarla."
+            )
+    finally:
+        st.session_state[STRATEGY_CREATION_PROCESSING_KEY] = False
+
+
 def ai_credential_ready(config: dict) -> bool:
     """Indica si hay credencial resoluble (Ollama no necesita ninguna)."""
     if not config.get("provider", "").startswith("Gemini"):
@@ -1029,22 +1870,26 @@ def ai_credential_ready(config: dict) -> bool:
 AI_PROVIDERS = ["Gemini (Google)", "Ollama (local)"]
 
 
-def render_ai_provider_form(prefix: str) -> dict:
+def render_ai_provider_form(prefix: str, on_change=None) -> dict:
     """Selector de proveedor + modelo + credencial, sin decides la maquetación.
 
-    Both the header popover and the modal reuse it so there is a single source of
-    truth for which models each provider offers.
+    The global assistant and other consumers reuse it so model options stay consistent.
     """
     provider = st.selectbox(
         "Proveedor de IA:",
         AI_PROVIDERS,
         key=f"{prefix}_provider",
+        on_change=on_change,
     )
 
     if provider.startswith("Gemini"):
-        model = st.selectbox("Modelo:", GEMINI_MODELS, key=f"{prefix}_model")
+        model = st.selectbox(
+            "Modelo:", GEMINI_MODELS, key=f"{prefix}_model", on_change=on_change
+        )
     else:
-        model = st.selectbox("Modelo:", OLLAMA_MODELS, key=f"{prefix}_model_local")
+        model = st.selectbox(
+            "Modelo:", OLLAMA_MODELS, key=f"{prefix}_model_local", on_change=on_change
+        )
 
     api_key, host = "", ""
     if provider.startswith("Gemini"):
@@ -1054,25 +1899,33 @@ def render_ai_provider_form(prefix: str) -> dict:
                 type="password",
                 key=f"{prefix}_api_key",
                 help="Se mantiene solo en esta sesión. Mejor define GEMINI_API_KEY en el entorno.",
+                on_change=on_change,
             )
     else:
+        st.session_state.setdefault(
+            f"{prefix}_ollama_host", OLLAMA_DEFAULT_HOST
+        )
         host = st.text_input(
-            "Host de Ollama:", value=OLLAMA_DEFAULT_HOST, key=f"{prefix}_ollama_host"
+            "Host de Ollama:",
+            key=f"{prefix}_ollama_host",
+            on_change=on_change,
         )
 
     return {"provider": provider, "model": model, "api_key": api_key, "host": host}
 
 
-def render_topbar_ai_popover() -> dict:
-    """Popover 🤖 de la barra superior: configuración de agente y modelo de IA.
+def sync_ai_config_state(source_prefix: str, target_prefix: str) -> None:
+    """Copy provider settings between UI keys while retaining one canonical config."""
+    for suffix in ("provider", "model", "model_local", "api_key", "ollama_host"):
+        source_key = f"{source_prefix}_{suffix}"
+        target_key = f"{target_prefix}_{suffix}"
+        if source_key in st.session_state:
+            st.session_state[target_key] = st.session_state[source_key]
 
-    Vive en el header para liberar la altura del panel de análisis. La selección
-    persiste en `st.session_state` con las claves del prefijo, igual que el resto
-    de la aplicación.
-    """
-    with st.popover("🤖", help="Configurar Agente y Modelo de IA"):
-        config = render_ai_provider_form(TOPBAR_AI_PREFIX)
-    return config
+
+def sync_assistant_ai_config_to_canonical() -> None:
+    """Persist assistant-panel widget changes into the canonical `hdr` state."""
+    sync_ai_config_state(ASSISTANT_AI_PREFIX, TOPBAR_AI_PREFIX)
 
 
 def ai_config_from_state(prefix: str) -> dict:
@@ -1443,7 +2296,7 @@ def modal_ia_optimizar():
     config = ai_config_from_state(TOPBAR_AI_PREFIX)
     st.caption(
         f"🤖 Agente: **{config['provider']}** · Modelo: `{config['model']}` "
-        "(cambiable en el popover 🤖 de la barra superior)"
+        "(cambiable en la configuración del asistente global)"
     )
 
     instructions = st.text_input(
@@ -1537,7 +2390,7 @@ def render_ai_backtest_panel(values, df_res, ticker, fast_ma, slow_ma, capital, 
             f"Capital ${float(capital):,.0f} · {script_name}"
         )
 
-        # El proveedor y el modelo se eligen una sola vez, en el popover 🤖 del header
+        # El proveedor y el modelo se leen desde la configuración global del asistente.
         config = ai_config_from_state(TOPBAR_AI_PREFIX)
 
         st.checkbox(
@@ -1688,14 +2541,418 @@ def render_ai_backtest_panel(values, df_res, ticker, fast_ma, slow_ma, capital, 
 # El gestor se pinta en dos grupos del sidebar (ESTRATEGIAS y ESTRATEGIAS A COMPARAR),
 # pero los clics se siguen resolviendo TODOS juntos al final del run: es lo que evita
 # que un widget de este run choque con los valores que aun guarda la sesión.
-def render_principal_panel(principal: str) -> None:
-    """Muestra la Estrategia Principal vigente (grupo ESTRATEGIAS)."""
-    st.markdown(
-        f'<div class="strategy-row principal"><span class="star">⭐</span>'
-        f'<span class="strategy-name">{principal}</span>'
-        f'<span class="strategy-tag">PRINCIPAL</span></div>',
-        unsafe_allow_html=True,
+def on_strategy_creation_proposal_changed() -> None:
+    """Persist rule edits and revoke any approval tied to an earlier proposal."""
+    rules_state = dict(st.session_state.get(STRATEGY_CREATION_RULES_KEY, {}))
+    edited_proposal = str(
+        st.session_state.get(STRATEGY_CREATION_PROPOSAL_INPUT_KEY, "")
     )
+    if edited_proposal != str(rules_state.get("proposal") or ""):
+        rules_state["proposal"] = edited_proposal
+        rules_state["approved"] = False
+        rules_state["approved_text"] = None
+        st.session_state[STRATEGY_CREATION_RULES_KEY] = rules_state
+        st.session_state[STRATEGY_CREATION_PHASE_KEY] = (
+            STRATEGY_CREATION_PHASE_PROPOSAL_PENDING
+        )
+
+
+def on_strategy_creation_code_changed() -> None:
+    """Keep the review editor and generated-code state synchronized and revalidate."""
+    source = str(st.session_state.get(STRATEGY_CREATION_CODE_EDITOR_KEY, ""))
+    filename = str(st.session_state.get(STRATEGY_CREATION_FILENAME_KEY, ""))
+    st.session_state[STRATEGY_CREATION_CODE_KEY] = source
+    st.session_state[STRATEGY_CREATION_VALIDATION_KEY] = validate_strategy_source(
+        source, filename or "estrategia.py"
+    )
+    if not st.session_state.get(PRINCIPAL_KEY):
+        st.session_state["codigo_actual"] = source
+        st.session_state["codigo_actual_script"] = ""
+        st.session_state["editor_loaded_for"] = None
+
+
+def save_generated_strategy_from_state(
+    filename: str, source: str, base: Path, available: list[str]
+) -> str:
+    """Save the reviewed candidate and update the same catalog used by the laboratory."""
+    path = save_strategy_source(base, filename, source)
+    relative = register_strategy_file(path, base, available)
+    st.session_state[STRATEGY_CREATION_SAVED_PATH_KEY] = relative
+    st.session_state[STRATEGY_CREATION_SAVED_CODE_KEY] = source
+    return relative
+
+
+def render_generated_strategy_review() -> None:
+    """Review, statically validate, download, and safely save generated source."""
+    source = st.session_state.get(STRATEGY_CREATION_CODE_KEY)
+    validation = st.session_state.get(STRATEGY_CREATION_VALIDATION_KEY) or {}
+    code_is_stale = bool(st.session_state.get(STRATEGY_CREATION_CODE_STALE_KEY))
+    if code_is_stale:
+        st.markdown("**Código anterior · reglas modificadas**")
+    elif validation.get("valid"):
+        st.markdown("**Código generado · contrato reconocido estáticamente**")
+    else:
+        st.markdown("**Respuesta de código · pendiente de corrección o validación**")
+
+    if source is not None:
+        if code_is_stale:
+            st.warning(
+                "La conversación continuó después de generar este código. Se conserva para "
+                "revisión, pero no se puede descargar ni guardar hasta generar una versión "
+                "nueva a partir de reglas aprobadas."
+            )
+        st.text_input(
+            "Nombre propuesto del archivo",
+            key=STRATEGY_CREATION_FILENAME_KEY,
+            help="Debe ser un nombre de archivo `.py`, sin rutas.",
+        )
+        st.text_area(
+            "Código Python de la estrategia",
+            key=STRATEGY_CREATION_CODE_EDITOR_KEY,
+            height=360,
+            on_change=on_strategy_creation_code_changed,
+        )
+        source = str(st.session_state.get(STRATEGY_CREATION_CODE_EDITOR_KEY, ""))
+        filename = str(st.session_state.get(STRATEGY_CREATION_FILENAME_KEY, ""))
+        validation = validate_strategy_source(source, filename or "estrategia.py")
+        st.session_state[STRATEGY_CREATION_VALIDATION_KEY] = validation
+        name_is_valid = is_valid_strategy_filename(filename)
+
+        if validation.get("valid"):
+            st.success(
+                f"Validación estática superada · contrato `{validation['dialect']}`. "
+                "El código está listo para guardar y, después de seleccionarlo, usar el "
+                "backtest existente. No se ha ejecutado ni probado su comportamiento."
+            )
+        else:
+            st.warning("La validación estática no está superada:")
+            for error in validation.get("errors", []):
+                st.markdown(f"- {error}")
+        if not name_is_valid:
+            st.warning("Indica un nombre de archivo válido terminado en `.py`, sin rutas.")
+
+        download_col, save_col = st.columns(2)
+        with download_col:
+            st.download_button(
+                "Descargar archivo Python",
+                data=source,
+                file_name=filename if name_is_valid else "estrategia_nueva.py",
+                mime="text/x-python",
+                key="strategy_creation_download",
+                use_container_width=True,
+                disabled=code_is_stale or not (validation.get("valid") and name_is_valid),
+            )
+        with save_col:
+            save_generated = st.button(
+                "Guardar como archivo nuevo",
+                key="strategy_creation_save_file",
+                use_container_width=True,
+                disabled=code_is_stale or not (validation.get("valid") and name_is_valid),
+            )
+        if save_generated:
+            try:
+                relative = save_generated_strategy_from_state(
+                    filename, source, BASE_DIR, ALL_STRATEGIES
+                )
+            except FileExistsError:
+                st.error(
+                    f"`{filename}` ya existe en el directorio oficial de estrategias. "
+                    "Elige otro nombre; no se sobrescribió."
+                )
+            except (OSError, ValueError) as exc:
+                st.error(f"No se pudo guardar la estrategia: {exc}")
+            else:
+                st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+                    f"Archivo guardado y registrado: `{relative}`. No se ejecutó."
+                )
+                st.rerun()
+
+    saved_path = st.session_state.get(STRATEGY_CREATION_SAVED_PATH_KEY)
+    if saved_path:
+        saved_file = BASE_DIR / saved_path
+        if saved_file.is_file() and saved_path in ALL_STRATEGIES:
+            st.success(f"Archivo guardado: `{saved_path}`.")
+            st.success("Estrategia reconocida en el catálogo del laboratorio.")
+            if (
+                st.session_state.get(STRATEGY_CREATION_SAVED_CODE_KEY)
+                != st.session_state.get(STRATEGY_CREATION_CODE_KEY)
+            ):
+                st.warning(
+                    "El código del editor cambió después de guardar; el archivo guardado "
+                    "conserva la versión anterior."
+                )
+            if st.session_state.get(PRINCIPAL_KEY) == saved_path:
+                st.success("Estrategia seleccionada como Principal y lista para el backtest.")
+                if metrics.get("error"):
+                    st.error(f"El backtest existente informó un error: {metrics['error']}")
+                elif not metrics.get("standby"):
+                    st.info("El laboratorio ya refleja el resultado de su motor de backtesting.")
+            else:
+                st.caption(
+                    "Seleccionar la estrategia como Principal inicia el flujo habitual de "
+                    "evaluación del laboratorio; no se envían órdenes a un broker."
+                )
+                if st.button(
+                    "Seleccionar como Estrategia Principal",
+                    key="strategy_creation_select_saved",
+                    use_container_width=True,
+                ):
+                    set_principal_strategy(saved_path, ALL_STRATEGIES)
+                    st.rerun()
+        else:
+            st.warning("El archivo guardado ya no está disponible en el catálogo actual.")
+
+
+def render_strategy_creation_assistant() -> None:
+    """Conversation-only strategy design view, isolated from editor and backtest state."""
+    if st.button(
+        "← Volver al asistente global",
+        key="strategy_creation_back",
+        use_container_width=True,
+    ):
+        st.session_state[ASSISTANT_MODE_KEY] = ASSISTANT_MODE_GLOBAL
+        st.rerun()
+
+    st.subheader("Crear estrategia desde cero")
+    st.caption(
+        "Diseñaremos las reglas conversando antes de generar código. "
+        "Puedes empezar con una idea o pegar un prompt extenso."
+    )
+    st.info(
+        "La generación se habilita únicamente después de proponer y aprobar las reglas. "
+        "El código generado se revisa y valida estáticamente antes de descargarlo o guardarlo; "
+        "generar, descargar y guardar no ejecuta la estrategia."
+    )
+
+    phase = st.session_state.get(
+        STRATEGY_CREATION_PHASE_KEY, STRATEGY_CREATION_PHASE_DESIGN
+    )
+    rules_state = dict(st.session_state.get(STRATEGY_CREATION_RULES_KEY, {}))
+    if rules_state.get("proposal") is not None and STRATEGY_CREATION_PROPOSAL_INPUT_KEY not in st.session_state:
+        st.session_state[STRATEGY_CREATION_PROPOSAL_INPUT_KEY] = str(
+            rules_state.get("proposal") or ""
+        )
+
+    for message in st.session_state.get(STRATEGY_CREATION_MESSAGES_KEY, []):
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        with st.chat_message(role):
+            st.markdown(str(message.get("content", "")))
+
+    approved_proposal = str(rules_state.get("proposal") or "").strip()
+    rules_approval_valid = bool(
+        rules_state.get("approved")
+        and approved_proposal
+        and rules_state.get("approved_text") == approved_proposal
+        and not strategy_creation_response_is_code(approved_proposal)
+    )
+    if phase in (
+        STRATEGY_CREATION_PHASE_PROPOSAL_PENDING,
+        STRATEGY_CREATION_PHASE_CODE_AUTHORIZED,
+    ) and rules_state.get("proposal") is not None:
+        st.text_area(
+            "Revisa y edita la especificación",
+            key=STRATEGY_CREATION_PROPOSAL_INPUT_KEY,
+            height=260,
+            on_change=on_strategy_creation_proposal_changed,
+            help="Los datos que no se conocen deben permanecer marcados como pendientes.",
+        )
+    if phase == STRATEGY_CREATION_PHASE_DESIGN:
+        st.caption("Fase: diseño de reglas; todavía no hay generación autorizada.")
+        assistant_messages = [
+            message
+            for message in st.session_state.get(STRATEGY_CREATION_MESSAGES_KEY, [])
+            if message.get("role") == "assistant"
+        ]
+        latest_response = (
+            str(assistant_messages[-1].get("content", "")).strip()
+            if assistant_messages
+            else ""
+        )
+        if st.button(
+            "Consolidar reglas",
+            key="strategy_creation_consolidate_rules",
+            use_container_width=True,
+            disabled=not any(
+                message.get("role") == "user"
+                for message in st.session_state.get(STRATEGY_CREATION_MESSAGES_KEY, [])
+            ),
+        ):
+            with st.spinner("Consolidando reglas y marcando datos desconocidos..."):
+                process_strategy_creation_message(
+                    "Consolida las reglas de estrategia discutidas hasta ahora.",
+                    consolidate_rules=True,
+                )
+            st.rerun()
+        if latest_response and strategy_creation_response_is_code(latest_response):
+            st.caption("Una respuesta con código se conserva, pero no constituye reglas aprobadas.")
+    elif phase == STRATEGY_CREATION_PHASE_PROPOSAL_PENDING:
+        rules_state = st.session_state.get(STRATEGY_CREATION_RULES_KEY, {})
+        st.markdown("**Propuesta de reglas pendiente de aprobación**")
+        if st.button(
+            "Aprobar reglas y habilitar generación",
+            key="strategy_creation_approve_rules",
+            type="primary",
+            use_container_width=True,
+        ):
+            proposed_rules = str(rules_state.get("proposal") or "").strip()
+            if proposed_rules and not strategy_creation_response_is_code(proposed_rules):
+                rules_state["approved"] = True
+                rules_state["approved_text"] = proposed_rules
+                st.session_state[STRATEGY_CREATION_RULES_KEY] = rules_state
+                st.session_state[STRATEGY_CREATION_PHASE_KEY] = (
+                    STRATEGY_CREATION_PHASE_CODE_AUTHORIZED
+                )
+                st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+                    "Reglas aprobadas. La generación sigue siendo una acción separada y explícita."
+                )
+            else:
+                st.session_state[STRATEGY_CREATION_NOTICE_KEY] = (
+                    "No hay una propuesta de reglas que aprobar."
+                )
+            st.rerun()
+        if st.button(
+            "Descartar propuesta y continuar el diseño",
+            key="strategy_creation_discard_proposal",
+            use_container_width=True,
+        ):
+            rules_state = dict(st.session_state.get(STRATEGY_CREATION_RULES_KEY, {}))
+            rules_state["proposal"] = None
+            rules_state["approved"] = False
+            rules_state["approved_text"] = None
+            st.session_state[STRATEGY_CREATION_RULES_KEY] = rules_state
+            st.session_state[STRATEGY_CREATION_PHASE_KEY] = STRATEGY_CREATION_PHASE_DESIGN
+            st.rerun()
+    elif phase == STRATEGY_CREATION_PHASE_CODE_AUTHORIZED and rules_approval_valid:
+        st.success("Fase: reglas aprobadas; generación de código autorizada.")
+        if st.button(
+            "Generar código de la estrategia",
+            key="strategy_creation_generate_code",
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner("Generando código para simulación y backtesting…"):
+                process_strategy_creation_message(
+                    "Genera el código Python completo de la estrategia basada únicamente "
+                    "en las reglas aprobadas. Propón un nombre de archivo descriptivo.",
+                    generate_code=True,
+                )
+            st.rerun()
+        if st.button(
+            "Revocar aprobación y volver al diseño",
+            key="strategy_creation_revoke_approval",
+            use_container_width=True,
+        ):
+            rules_state = dict(st.session_state.get(STRATEGY_CREATION_RULES_KEY, {}))
+            rules_state["approved"] = False
+            rules_state["proposal"] = None
+            rules_state["approved_text"] = None
+            st.session_state[STRATEGY_CREATION_RULES_KEY] = rules_state
+            st.session_state[STRATEGY_CREATION_PHASE_KEY] = STRATEGY_CREATION_PHASE_DESIGN
+            st.rerun()
+    elif phase == STRATEGY_CREATION_PHASE_CODE_AUTHORIZED:
+        st.warning(
+            "La fase indica autorización, pero no hay una propuesta de reglas aprobada válida. "
+            "Vuelve a proponer y aprobar reglas antes de generar código."
+        )
+    else:
+        st.info("Fase: código pendiente de validación.")
+        render_generated_strategy_review()
+
+    if (
+        phase != STRATEGY_CREATION_PHASE_CODE_PENDING_VALIDATION
+        and st.session_state.get(STRATEGY_CREATION_CODE_STALE_KEY)
+        and st.session_state.get(STRATEGY_CREATION_CODE_KEY) is not None
+    ):
+        render_generated_strategy_review()
+
+    error = st.session_state.get(STRATEGY_CREATION_ERROR_KEY)
+    if error:
+        st.error(error)
+    notice = st.session_state.get(STRATEGY_CREATION_NOTICE_KEY)
+    if notice:
+        st.info(notice)
+
+    with st.form("strategy_creation_form", clear_on_submit=True):
+        user_message = st.text_area(
+            "Instrucciones o prompt",
+            key=STRATEGY_CREATION_INPUT_KEY,
+            height=120,
+            placeholder="Describe tu idea; la IA te ayudará a precisar las reglas.",
+        )
+        send_message = st.form_submit_button(
+            "Enviar mensaje",
+            key="strategy_creation_send",
+            type="primary",
+            use_container_width=True,
+        )
+    if send_message:
+        if not user_message.strip():
+            st.warning("Escribe una idea o una pregunta antes de enviar.")
+        else:
+            with st.spinner("Conversando sobre las reglas de la estrategia…"):
+                process_strategy_creation_message(user_message)
+            st.rerun()
+
+
+def render_principal_panel(principal: str | None, pending: dict) -> None:
+    """Muestra la estrategia principal en una fila compacta y adaptable."""
+    with st.container(key="principal-strategy-row"):
+        if not principal:
+            st.markdown(
+                '<div class="principal-card empty">'
+                'Ninguna estrategia seleccionada'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            return
+
+        tarjeta_col, quitar_col = st.columns(
+            [1, 0.12], vertical_alignment="center", gap="small"
+        )
+
+        with tarjeta_col:
+            st.markdown(
+                f'<div class="principal-card" title="{escape(principal)}">'
+                f'<span class="card-icon">??</span>'
+                f'<span class="strategy-name">'
+                f'{escape(Path(principal).name)}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+        with quitar_col:
+            if st.button(
+                "🗑️",
+                key="btn_quitar_principal",
+                help="Quitar estrategia principal",
+            ):
+                pending["quitar"] = True
+
+
+def render_principal_prototype(principal: str | None) -> None:
+    """Render a visual-only alternative for comparing the principal strategy row."""
+    with st.container(key="principal-prototype"):
+        name = Path(principal).name if principal else None
+        value_class = "principal-prototype-value" + (" empty" if name is None else "")
+        value = escape(name) if name else "Ninguna estrategia seleccionada"
+
+        st.markdown(
+            '<div class="principal-prototype-heading">'
+            "PROTOTIPO — ESTRATEGIA PRINCIPAL</div>"
+            '<div class="principal-prototype-row">'
+            f'<div class="{value_class}" title="{escape(name or "")}">{value}</div>'
+            + (
+                '<button class="principal-prototype-delete" type="button" '
+                'title="Quitar estrategia principal" aria-label="Quitar estrategia principal">'
+                "🗑️</button>"
+                if name
+                else ""
+            )
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+
 
 
 def render_comparativas_panel(available: list[str], principal: str, pending: dict) -> None:
@@ -1755,7 +3012,7 @@ def render_comparativas_panel(available: list[str], principal: str, pending: dic
         modal_abrir_estrategia()
 
 
-def aplicar_gestor_pendientes(available: list[str], principal: str, pending: dict) -> str:
+def aplicar_gestor_pendientes(available: list[str], principal, pending: dict):
     """Aplica los clics de ambos grupos y devuelve la Estrategia Principal vigente.
 
     Las altas de comparativa llegan ya aplicadas por `add_comparative_strategy` (que es
@@ -1767,6 +3024,10 @@ def aplicar_gestor_pendientes(available: list[str], principal: str, pending: dic
 
     if pending_star is not None:
         set_principal_strategy(pending_star, available)
+        st.rerun()
+
+    if pending.get("quitar"):
+        clear_principal_strategy()
         st.rerun()
 
     selected = list(st.session_state.get(COMPARE_KEY, []))
@@ -1784,7 +3045,9 @@ def aplicar_gestor_pendientes(available: list[str], principal: str, pending: dic
     notice = st.session_state.pop("compare_notice", None)
     if notice:
         st.caption(f"⚠️ {notice}")
-    return st.session_state[PRINCIPAL_KEY]
+    # Sin Principal se entrega "" y no None: el resto de la app (editor, modal, IA) ya
+    # trabaja con cadenas vacías, y `None` se reserva para el estado vacío del grupo 1.
+    return st.session_state[PRINCIPAL_KEY] or ""
 
 
 # -----------------------------------------------------------------------------
@@ -1853,21 +3116,48 @@ with st.sidebar:
     st.markdown(
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">'
         '<span style="font-size:22px">🧪</span>'
-        '<span style="font-size:17px;font-weight:700;color:#0f172a;letter-spacing:.05em">QUANTLAB IDE</span>'
+        '<span style="font-size:16px;font-weight:700;color:#0f172a;letter-spacing:.02em">GABO trader LAB</span>'
         "</div>",
         unsafe_allow_html=True,
     )
-    st.caption(f"LEAN Engine: {ENGINE_VERSION}")
-
-    # --- 1. ESTRATEGIAS -------------------------------------------------
-    # G.3.6: el grupo se reparte en dos bloques (apertura y Principal) con altura
-    # suficiente para que ambos se lean sin venir prensados.
-    with st.expander(SIDEBAR_GROUPS[0], expanded=True, key="grp_estrategias"):
+    active_context = st.session_state.get("workspace_tab", WORKSPACE_TABS[0])
+    if active_context == "INICIO":
+        with st.container(border=True):
+            st.markdown("**Filtros del mercado**")
+            st.caption(
+                "Filtros por activo, tendencia y volatilidad disponibles en una fase futura."
+            )
+            st.caption("Fuente de datos: no disponible.")
+    elif active_context != "LABORATORIO":
+        with st.container(border=True):
+            st.markdown(f"**Contexto · {active_context}**")
+            st.caption(
+                "Este espacio está preparado para el contexto de la pestaña. "
+                "El estado y los parámetros del Laboratorio se conservan al navegar."
+            )
+    if active_context != "LABORATORIO":
         st.markdown(
-            '<div class="strategy-subtitle">📂 Abrir Estrategia (.py)</div>',
+            """
+<style>
+    .st-key-grp_estrategias, .st-key-grp_comparar, .st-key-grp_reglas,
+    .st-key-grp_parametros, .st-key-grp_visualizacion, .st-key-grp_estado {
+        display: none !important;
+    }
+</style>
+""",
             unsafe_allow_html=True,
         )
-        if st.button("📂 Abrir Estrategia", use_container_width=True, key="btn_open_strategy"):
+
+    # --- 1. ESTRATEGIAS -------------------------------------------------
+    # G.3.7: el grupo se abre VACÍO y conserva el botón compacto de apertura junto a la
+    # tarjeta de la Estrategia Principal. Ningún clic se aplica aquí: `pending_gestor`
+    # los resuelve al final del run.
+    pending_gestor = {"star": None, "checks": {}, "quitar": False}
+    with st.expander(SIDEBAR_GROUPS[0], expanded=True, key="grp_estrategias"):
+        # El acceso compacto reutiliza el selector, la key y el modal existentes.
+        if st.button(
+            "📂 Abrir Estrategia", key="btn_open_strategy", help="Abrir Estrategia",
+        ):
             st.session_state[MODAL_MODO_KEY] = MODO_PRINCIPAL
             modal_abrir_estrategia()
 
@@ -1879,10 +3169,86 @@ with st.sidebar:
             '<div class="strategy-subtitle">⭐ Estrategia Principal</div>',
             unsafe_allow_html=True,
         )
-        render_principal_panel(principal_script)
+
+        # PRUEBA VISUAL: mostrar solo el prototipo.
+        # La fila original se conserva para recuperarla si hace falta.
+        render_principal_panel(principal_script, pending_gestor)
+        # render_principal_prototype(principal_script)
+
+
+    # --- PRUEBA TEMPORAL: expander vac?o entre los grupos 1 y 2 -------------
+    if active_context == "LABORATORIO":
+        with st.expander("⭐ ESTRATEGIA PRINCIPAL", expanded=False, key="grp_prueba"):
+            st.markdown(
+                '<div class="strategy-subtitle">'
+                ''
+                '⭐ Estrategia Principal'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            icon_col, message_col, delete_col = st.columns(
+                [0.15, 0.73, 0.12],
+                vertical_alignment="center",
+                gap="small",
+            )
+
+            with icon_col:
+                if st.button(
+                    "+",
+                    key="btn_prueba_abrir_estrategia",
+                    help="Agregar una estrategia",
+                    use_container_width=True,
+                ):
+                    st.session_state[MODAL_MODO_KEY] = MODO_PRINCIPAL
+                    modal_abrir_estrategia()
+
+            with message_col:
+                if principal_script:
+                    st.markdown(
+                        '<div style="width:100%; min-width:0; min-height:42px; '
+                        'display:flex; align-items:center; padding:8px; '
+                        'box-sizing:border-box; border:1px solid #86efac; '
+                        'border-radius:8px; background:#f0fdf4; color:#0f172a; '
+                        'font-size:11px; font-weight:700; line-height:1.4; '
+                        'overflow-wrap:anywhere;">'
+                        f'{escape(Path(principal_script).name)}'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<div style="width:100%; min-width:0; min-height:42px; '
+                        'display:flex; align-items:center; justify-content:center; '
+                        'padding:8px; box-sizing:border-box; '
+                        'border:1px dashed #cbd5e1; border-radius:8px; '
+                        'background:#f8fafc; color:#94a3b8; font-size:11px; '
+                        'line-height:1.4; overflow-wrap:anywhere;">'
+                        'Ninguna estrategia seleccionada'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            with delete_col:
+                if principal_script:
+                    if st.button(
+                        "🗑️",
+                        key="btn_prueba_quitar_principal",
+                        help="Quitar estrategia principal",
+                        use_container_width=True,
+                    ):
+                        pending_gestor["quitar"] = True
+
+            if st.button(
+                "✨ Crear con IA",
+                key="strategy_creation_activate",
+                help="Formular estrategia desde cero con IA",
+                use_container_width=True,
+            ):
+                st.session_state[ASSISTANT_MODE_KEY] = ASSISTANT_MODE_CREATE_STRATEGY
+                st.session_state[STRATEGY_CREATION_ERROR_KEY] = None
 
     # --- 2. ESTRATEGIAS A COMPARAR --------------------------------------
-    pending_gestor = {"star": None, "checks": {}}
     with st.expander(SIDEBAR_GROUPS[1], expanded=False, key="grp_comparar"):
         render_comparativas_panel(ALL_STRATEGIES, principal_script, pending_gestor)
 
@@ -1892,13 +3258,20 @@ with st.sidebar:
     )
     st.session_state["script_nombre"] = selected_script
 
-    flash_msg = st.session_state.pop("flash_msg", None)
-    if flash_msg:
-        st.toast(flash_msg, icon="✅")
+    # Sin Principal, `selected_script` es "" y el resto de la app sigue siendo la misma
+    # con una única diferencia: las etiquetas muestran que no hay ninguna estrategia.
+    sin_principal = not selected_script
+    etiqueta_principal = selected_script or SIN_ESTRATEGIA_NOMBRE
 
     # Una sola lectura del archivo de la Principal la comparten el grupo 3 (sus reglas
-    # comunes) y el grupo 4 (sus parámetros ajustables).
-    info_estrategia = strategy_parser.analizar_archivo(BASE_DIR / selected_script)
+    # comunes) y el grupo 4 (sus parámetros ajustables). Sin Principal no hay archivo
+    # que leer: se analiza una fuente vacía, para que ambos grupos muestren su estado
+    # de espera en vez de un error de lectura de `BASE_DIR`.
+    info_estrategia = (
+        strategy_parser.analizar_archivo(BASE_DIR / selected_script)
+        if selected_script
+        else strategy_parser.analizar_fuente("", nombre=SIN_ESTRATEGIA_NOMBRE)
+    )
 
     # --- 3. REGLAS COMUNES ----------------------------------------------
     # G.3.6: los dos campos de este grupo salen del archivo de la Estrategia Principal.
@@ -2138,297 +3511,624 @@ def build_comparison_table(main_metrics: dict, comparatives: list[dict], asset: 
 # -----------------------------------------------------------------------------
 # WORKSPACE TOPBAR
 # -----------------------------------------------------------------------------
-# La barra superior se parte en tres bloques para poder insertar el popover 🤖
-# como un widget real de Streamlit (no se puede meter un popover dentro de HTML).
-top_left, top_ai, top_right = st.columns([6, 0.55, 6], vertical_alignment="center", gap="small")
+# La barra superior conserva únicamente la marca y el entorno de la aplicación.
+top_left, top_right = st.columns([5, 7], vertical_alignment="center", gap="small")
 
 with top_left:
     st.markdown(
         f"""
 <div class="topbar">
     <span class="brand">GABO trader LAB</span>
-    <span class="badge">📄 {selected_script}</span>
-    <span class="badge">📊 {asset}</span>
 </div>
 """,
         unsafe_allow_html=True,
     )
-
-with top_ai:
-    ai_config = render_topbar_ai_popover()
 
 with top_right:
     st.markdown(
         f"""
 <div class="topbar topbar-right">
-    <span class="badge">SMA {fast_period}/{slow_period}</span>
-    <span class="badge ai">🤖 {ai_config['model']}</span>
-    <span class="badge live">● LIVE</span>
-    <span class="badge">LEAN {ENGINE_VERSION}</span>
+    <span class="badge">Entorno · {ENVIRONMENT}</span>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
-# -----------------------------------------------------------------------------
-# 2. BARRA SUPERIOR DE METRICAS (KPIs)
-# -----------------------------------------------------------------------------
-equity_value = auto("equity")
-total_return_value = auto("total_return")
-drawdown_value = auto("max_drawdown")
-win_rate_value = auto("win_rate")
-sharpe_value = auto("sharpe")
+def select_workspace(tab: str) -> None:
+    """Change the active view through Streamlit's normal session state."""
+    st.session_state["workspace_tab"] = tab
 
-st.markdown(
-    f"""
-<div class="kpi-container">
-    <div class="kpi-card"><div class="kpi-label">Capital Final</div>
-        <div class="kpi-value {'positive' if equity_value >= initial_cap else 'negative'}">${equity_value:,.2f}</div></div>
-    <div class="kpi-card"><div class="kpi-label">Retorno Total</div>
-        <div class="kpi-value {'positive' if total_return_value >= 0 else 'negative'}">{total_return_value:.2f}%</div></div>
-    <div class="kpi-card"><div class="kpi-label">Max Drawdown</div>
-        <div class="kpi-value {'negative' if drawdown_value < 0 else 'positive'}">{drawdown_value:.2f}%</div></div>
-    <div class="kpi-card"><div class="kpi-label">Win Rate</div>
-        <div class="kpi-value {'positive' if win_rate_value >= 0 else 'negative'}">{win_rate_value:.1f}%</div></div>
-    <div class="kpi-card"><div class="kpi-label">Sharpe Ratio</div>
-        <div class="kpi-value {'positive' if sharpe_value >= 0 else 'negative'}">{sharpe_value:.2f}</div></div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
 
-# -----------------------------------------------------------------------------
-# 3. PANTALLA DIVIDIDA (50/50)
-# -----------------------------------------------------------------------------
-col_left, col_right = st.columns([1, 1], gap="medium")
+def persist_editor_code(script: str, editor_key: str) -> None:
+    """Keep editor contents outside the widget so tab changes can unmount it safely."""
+    if editor_key in st.session_state:
+        st.session_state["codigo_actual"] = st.session_state[editor_key]
+        st.session_state["codigo_actual_script"] = script
+        if (
+            not script
+            and st.session_state.get(STRATEGY_CREATION_CODE_KEY) is not None
+        ):
+            source = str(st.session_state[editor_key])
+            st.session_state[STRATEGY_CREATION_CODE_KEY] = source
+            st.session_state[STRATEGY_CREATION_CODE_EDITOR_KEY] = source
+            st.session_state[STRATEGY_CREATION_VALIDATION_KEY] = (
+                validate_strategy_source(
+                    source,
+                    str(st.session_state.get(STRATEGY_CREATION_FILENAME_KEY, "estrategia.py")),
+                )
+            )
 
-# --- COLUMNA IZQUIERDA: EDITOR DE CÓDIGO ---
-with col_left:
+
+def render_inicio_home() -> None:
+    """Portada inicial sin cotizaciones ni resultados de detección simulados."""
+    st.title("🏠 INICIO")
+    st.caption("Exploración del mercado, detección de eventos y análisis de oportunidades.")
+    st.info("Datos no disponibles · No hay una fuente de datos de mercado conectada.")
+
+    st.subheader("Panorama del mercado")
+    st.caption("Conecta una fuente de datos para consultar el panorama del mercado.")
+    market_cards = st.columns(4, gap="small")
+    for column, heading in zip(
+        market_cards, ("Índices de mercado", "Tendencia general", "Volatilidad", "Amplitud")
+    ):
+        with column:
+            st.markdown(
+                f'<div class="workspace-card"><strong>{heading}</strong><br>'
+                '<span>Sin fuente de datos conectada</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.subheader("Oportunidades candidatas")
     st.markdown(
-        f'<div class="editor-header"><span class="dot">●</span> 📄 {selected_script}</div>',
+        '<div class="workspace-empty">Aún no hay oportunidades evaluadas. '
+        'La detección se incorporará en una fase posterior.</div>',
         unsafe_allow_html=True,
     )
-
-    code_path = BASE_DIR / selected_script
-    code_content = read_script_source(selected_script)
-
-    editor_key = f"editor_{selected_script}"
-    needs_seed = (
-        editor_key not in st.session_state
-        or st.session_state.get("editor_loaded_for") != selected_script
-    )
-    if needs_seed:
-        # El modal "Abrir Estrategia" inyecta el contenido ya leído en codigo_actual
-        if st.session_state.get("codigo_actual_script") == selected_script and "codigo_actual" in st.session_state:
-            st.session_state[editor_key] = st.session_state["codigo_actual"]
-        else:
-            st.session_state[editor_key] = code_content
-        st.session_state["editor_loaded_for"] = selected_script
-
-    edited_code = st.text_area(
-        "Editar código Python:",
-        key=editor_key,
-        height=262,
-        label_visibility="collapsed",
-    )
-
-    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
-    with btn_col1:
-        save_clicked = st.button("💾 Guardar Cambios", use_container_width=True, key="btn_save")
-    with btn_col2:
-        run_clicked = st.button(
-            "▶ Ejecutar Backtest", type="primary", use_container_width=True, key="btn_run"
-        )
-    with btn_col3:
-        ai_clicked = st.button("🪄 Optimizar con IA", use_container_width=True, key="btn_ai")
-
-    if ai_clicked:
-        st.session_state["codigo_actual"] = edited_code
-        st.session_state["codigo_actual_script"] = selected_script
-        modal_ia_optimizar()
-
-    ai_hint = st.session_state.get("ai_instrucciones", "").strip()
     st.caption(
-        f"🪄 Instrucción pendiente para la IA: {ai_hint}" if ai_hint else "🪄 Pulsa «Optimizar con IA» para revisar la estrategia."
+        "Áreas futuras: tendencias y rupturas · retrocesos · volumen inusual · "
+        "cambios de volatilidad · condiciones técnicas."
     )
 
-    render_draft_area(display_metrics(), asset, fast_period, slow_period, initial_cap)
-
-    st.markdown(
-        '<div class="panel" style="padding:10px 12px">'
-        '<div class="panel-title" style="margin-bottom:6px">💾 Guardar Como</div>',
-        unsafe_allow_html=True,
-    )
-    sa_col1, sa_col2 = st.columns([2, 1])
-    with sa_col1:
-        new_filename = st.text_input(
-            "Nuevo nombre (.py):",
-            value=f"copia_{Path(selected_script).name}",
-            key="new_filename",
-            label_visibility="collapsed",
-        )
-    with sa_col2:
-        save_as_clicked = st.button("📝 Guardar Como", use_container_width=True, key="btn_save_as")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    if save_clicked:
-        try:
-            code_path.write_text(edited_code, encoding="utf-8")
-        except OSError as exc:
-            st.error(f"❌ No se pudo guardar `{selected_script}`: {exc}")
-        else:
-            st.toast(f"💾 Guardado en `{selected_script}`", icon="✅")
-
-    if save_as_clicked:
-        target_name = new_filename if new_filename.endswith(".py") else f"{new_filename}.py"
-        target = code_path.parent / target_name
-        try:
-            target.write_text(edited_code, encoding="utf-8")
-        except OSError as exc:
-            st.error(f"❌ No se pudo crear `{target_name}`: {exc}")
-        else:
-            st.toast(f"📝 Creado `{target.name}`", icon="✅")
-
-    if run_clicked:
-        st.session_state["force_run"] = True
-        st.rerun()
-
-# --- COLUMNA DERECHA: GRÁFICO INTERACTIVO ---
-with col_right:
-    chart_head, view_col = st.columns([3.2, 1], vertical_alignment="center", gap="small")
-    with chart_head:
+    patterns_col, portfolio_col = st.columns(2, gap="medium")
+    with patterns_col:
+        st.subheader("Patrones y eventos")
         st.markdown(
-            f'<div class="panel-title">📈 Principal vs Comparativas · Benchmark ({asset})</div>',
+            '<div class="workspace-empty">Todavía no hay patrones ni eventos registrados.</div>',
             unsafe_allow_html=True,
         )
-    with view_col:
-        chart_view = st.segmented_control(
-            "Vista del patrimonio:",
-            EQUITY_VIEWS,
-            default=st.session_state.get(CHART_VIEW_KEY, "$"),
-            key=f"{CHART_VIEW_KEY}_widget",
-            label_visibility="collapsed",
-            help="Alterna entre dólares, retorno acumulado, base 100 y escala logarítmica.",
-        ) or st.session_state.get(CHART_VIEW_KEY, "$")
-    st.session_state[CHART_VIEW_KEY] = chart_view
-
-    draft_metrics, draft_equity = read_draft_curve(st.session_state)
-
-    # Las comparativas marcadas en el sidebar se ejecutan con los mismos parámetros.
-    compare_scripts = [s for s in st.session_state.get(COMPARE_KEY, []) if s != selected_script]
-    compare_results = get_comparative_results(
-        compare_scripts, asset, initial_cap
-    ) if compare_scripts else {}
-
-    comparative_curves = []
-    for script in compare_scripts[:MAX_COMPARATIVES]:
-        payload = compare_results.get(script) or {}
-        curve_df, curve_metrics = payload.get("df"), payload.get("metrics") or {}
-        comparative_curves.append({
-            "name": Path(script).name,
-            "script": script,
-            "equity": curve_df["Equity"] if curve_df is not None else pd.Series(dtype=float),
-            "metrics": curve_metrics,
-        })
-
-    fig = build_equity_figure(
-        df_res,
-        asset,
-        selected_script,
-        show_equity,
-        show_benchmark,
-        show_drawdown,
-        draft_metrics,
-        draft_equity,
-        comparative_curves,
-        chart_view,
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
-    )
-
-    comparativas_ok = [c for c in comparative_curves if not c["metrics"].get("error")]
-    if comparativas_ok:
-        st.caption(
-            "🔵 Principal ⭐ · 🟠/🟢 comparativas marcadas con [x] · "
-            "⚪ Benchmark · 🟣 borrador de IA (si está en prueba)"
+        st.caption("Estados previstos para clasificar registros futuros; no hay hallazgos:")
+        st.markdown(
+            '<span class="pattern-status pending">Hipótesis pendiente de validar</span>'
+            '<span class="pattern-status research">En investigación</span>'
+            '<span class="pattern-status validated">Validado</span>'
+            '<span class="pattern-status expired">Ha perdido vigencia</span>',
+            unsafe_allow_html=True,
         )
-    for item in comparative_curves:
-        if item["metrics"].get("error"):
-            st.error(f"❌ `{item['script']}`: {item['metrics']['error']}")
-    if draft_equity is not None and draft_metrics:
-        st.caption(
-            f"🧪 Curva violeta punteada = borrador de IA en prueba "
-            f"(Capital Final ${draft_metrics['equity']:,.2f})."
+    with portfolio_col:
+        st.subheader("Relación con el portafolio")
+        st.markdown(
+            '<div class="workspace-empty">No hay un portafolio seleccionado. '
+            'No se muestran posiciones, entradas ni alertas.</div>',
+            unsafe_allow_html=True,
         )
 
-    # El panel analiza exactamente las mismas métricas que muestra la barra de KPIs
-    values = display_metrics()
-
-    render_ai_backtest_panel(
-        values, df_res, asset, fast_period, slow_period, initial_cap, selected_script
+    st.subheader("Acceso a otros módulos")
+    actions = (
+        ("Abrir en Laboratorio", "LABORATORIO", "discover_open_lab"),
+        ("Investigar en Patrones", "PATRONES Y DESCUBRIMIENTO", "discover_open_patterns"),
+        ("Consultar Portafolio", "PORTAFOLIO", "discover_open_portfolio"),
+        ("Ver Resultados", "RESULTADOS Y ANÁLISIS", "discover_open_results"),
     )
+    action_columns = st.columns(len(actions), gap="small")
+    for column, (label, target, key) in zip(action_columns, actions):
+        with column:
+            st.button(
+                label,
+                key=key,
+                use_container_width=True,
+                on_click=select_workspace,
+                args=(target,),
+            )
 
-# -----------------------------------------------------------------------------
-# 3b. TABLA COMPARATIVA DE MÉTRICAS (Principal vs Comparativas vs Benchmark)
-# -----------------------------------------------------------------------------
-st.markdown(
-    '<div class="panel-title" style="margin-top:10px">📊 Tabla Comparativa de Métricas</div>',
-    unsafe_allow_html=True,
-)
-tabla_comparativa = build_comparison_table(values, comparative_curves, asset)
-st.dataframe(
-    tabla_comparativa,
-    hide_index=True,
-    use_container_width=True,
-    column_config={
-        "Estrategia": st.column_config.TextColumn(width="medium"),
-        "Retorno %": st.column_config.NumberColumn(format="%.2f%%"),
-        "Vs Principal": st.column_config.NumberColumn(format="%+.2f pts", help="Diferencia en puntos porcentuales contra la principal"),
-        "Sharpe": st.column_config.NumberColumn(format="%.2f"),
-        "Max Drawdown %": st.column_config.NumberColumn(format="%.2f%%"),
-        "Comisiones $": st.column_config.NumberColumn(format="$%.2f", help="Comisión estimada (0.05 % del capital por fill)"),
-        "Fills": st.column_config.NumberColumn(format="%d", help="Cambios de exposición: entradas y salidas"),
-        "Error": st.column_config.TextColumn(width="medium"),
-    },
-)
 
-# -----------------------------------------------------------------------------
-# 4. TERMINAL Y LOGS INFERIOR
-# -----------------------------------------------------------------------------
-st.markdown(
-    '<div class="panel-title" style="margin-top:6px">💻 Cloud Terminal &amp; Logs</div>',
-    unsafe_allow_html=True,
-)
+def render_other_workspace(tab: str) -> None:
+    """Pinta el estado inicial de los módulos todavía no implementados."""
+    if tab == "INICIO":
+        render_inicio_home()
+    elif tab == "PATRONES Y DESCUBRIMIENTO":
+        st.header("Patrones y descubrimiento")
+        st.markdown(
+            '<div class="workspace-empty">Espacio preparado para investigar, '
+            'validar y descubrir patrones de mercado.</div>',
+            unsafe_allow_html=True,
+        )
+    elif tab == "PORTAFOLIO":
+        st.header(tab)
+        st.caption(
+            "Estructura preparada para separar cuentas y tipos de portafolio. "
+            "No hay cuentas conectadas ni operaciones cargadas."
+        )
+        account_col, paper_col, market_col = st.columns(3, gap="medium")
+        with account_col:
+            st.markdown(
+                '<div class="workspace-card"><strong>Varias cuentas</strong><br>'
+                '<span>Espacio para organizar cuentas cuando exista su integración.</span></div>',
+                unsafe_allow_html=True,
+            )
+        with paper_col:
+            st.markdown(
+                '<div class="workspace-card"><strong>Portafolios ficticios</strong><br>'
+                '<span>Separados de cuentas con precios de mercado.</span></div>',
+                unsafe_allow_html=True,
+            )
+        with market_col:
+            st.markdown(
+                '<div class="workspace-card"><strong>Simulación y real</strong><br>'
+                '<span>Sin conexión a broker ni ejecución de órdenes.</span></div>',
+                unsafe_allow_html=True,
+            )
+    elif tab == "RESULTADOS Y ANÁLISIS":
+        st.header(tab)
+        if metrics.get("standby") or metrics.get("error"):
+            st.markdown(
+                '<div class="workspace-empty">No hay resultados válidos para '
+                'centralizar todavía. Ejecuta un backtest desde Laboratorio.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info(
+                "Los resultados válidos permanecen en Laboratorio. Esta vista queda "
+                "preparada para centralizar métricas, curvas, drawdown y operaciones."
+            )
+    elif tab == "HISTORIAL Y EXPERIMENTOS":
+        st.header(tab)
+        st.markdown(
+            '<div class="workspace-empty">El historial persistente y el registro de '
+            'experimentos todavía no están implementados.</div>',
+            unsafe_allow_html=True,
+        )
 
-log_time = datetime.now().strftime("%H:%M:%S")
-ts = f'<span class="t-dim">{log_time}</span>'
-source_line = (
-    f'{ts} <span class="t-info">[INFO]</span> Fetched historical market data for '
-    f'<span class="t-key">{asset}</span> ({metrics["bars"]} daily bars).'
-    if live
-    else f'{ts} <span class="t-warn">[WARN]</span> Market feed unreachable — rendering reference snapshot.'
-)
-status_tone = "t-ok" if total_return_value >= 0 else "t-err"
 
-st.markdown(
-    f"""
-<div class="terminal-box">
-    {ts} <span class="t-info">[INFO]</span> Initializing Lean Engine {ENGINE_VERSION}...<br>
-    {ts} <span class="t-info">[INFO]</span> Workspace mounted: <span class="t-key">C:\\QuantConnect\\projects\\quantlab</span><br>
-    {ts} <span class="t-info">[INFO]</span> Loaded strategy script: <span class="t-key">{selected_script}</span><br>
-    {ts} <span class="t-info">[INFO]</span> Parameters &rarr; Fast SMA: <span class="t-key">{fast_period}</span> | Slow SMA: <span class="t-key">{slow_period}</span> | Capital: <span class="t-key">${initial_cap:,.2f}</span><br>
-    {source_line}<br>
-    {ts} <span class="t-info">[INFO]</span> Simulation resolved <span class="t-key">{metrics["trades"]}</span> round-trip trades.<br>
-    {ts} <span class="t-ok">[SUCCESS]</span> Backtest deployed in 1.42 seconds. Total points processed: {metrics["bars"]} bar points.<br>
-    {ts} <span class="t-info">[INFO]</span> Fees: <span class="t-key">${metrics["fees"]:.2f}</span> | Volume: <span class="t-key">${metrics["volume"]:,.0f}</span> | Sharpe: <span class="t-key">{sharpe_value:.2f}</span><br>
-    {ts} <span class="{status_tone}">[STATUS]</span> Final Equity: <span class="t-key">${equity_value:,.2f}</span> ({total_return_value:.2f}%) &middot; Max DD: {drawdown_value:.2f}% &middot; Win Rate: {win_rate_value:.1f}%<br>
-    {ts} <span class="t-ok">[READY]</span> Cloud node idle. Awaiting next deployment...
+def render_laboratorio_center() -> None:
+    flash_msg = st.session_state.pop("flash_msg", None)
+    if flash_msg:
+        st.toast(flash_msg, icon="✅")
+
+    if metrics.get("standby"):
+        st.info(
+            "💤 **Backtest en espera: selecciona una estrategia.** Abre una estrategia "
+            "con «📂 Abrir Estrategia» en el panel izquierdo; hasta entonces no se "
+            "ejecuta ningún backtest."
+        )
+
+    if metrics.get("standby"):
+        backtest_status, status_class = "Backtest en espera", "waiting"
+    elif metrics.get("error"):
+        backtest_status, status_class = "Backtest con error", "error"
+    else:
+        backtest_status, status_class = "Backtest disponible", "ready"
+    st.markdown(
+        f"""
+<div class="lab-context">
+    <span class="badge">Estrategia · {escape(etiqueta_principal)}</span>
+    <span class="badge">Activo de trabajo · {escape(str(asset))}</span>
+    <span class="badge status {status_class}">{backtest_status}</span>
 </div>
 """,
-    unsafe_allow_html=True,
+        unsafe_allow_html=True,
+    )
+    with st.expander("Información técnica", expanded=False):
+        st.caption(f"Identificador interno del motor · {ENGINE_VERSION}")
+
+    # -----------------------------------------------------------------------------
+    # 2. BARRA SUPERIOR DE METRICAS (KPIs)
+    # -----------------------------------------------------------------------------
+    equity_value = auto("equity")
+    total_return_value = auto("total_return")
+    drawdown_value = auto("max_drawdown")
+    win_rate_value = auto("win_rate")
+    sharpe_value = auto("sharpe")
+
+    st.markdown(
+        f"""
+    <div class="kpi-container">
+        <div class="kpi-card"><div class="kpi-label">Capital Final</div>
+            <div class="kpi-value {'positive' if equity_value >= initial_cap else 'negative'}">${equity_value:,.2f}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Retorno Total</div>
+            <div class="kpi-value {'positive' if total_return_value >= 0 else 'negative'}">{total_return_value:.2f}%</div></div>
+        <div class="kpi-card"><div class="kpi-label">Max Drawdown</div>
+            <div class="kpi-value {'negative' if drawdown_value < 0 else 'positive'}">{drawdown_value:.2f}%</div></div>
+        <div class="kpi-card"><div class="kpi-label">Win Rate</div>
+            <div class="kpi-value {'positive' if win_rate_value >= 0 else 'negative'}">{win_rate_value:.1f}%</div></div>
+        <div class="kpi-card"><div class="kpi-label">Sharpe Ratio</div>
+            <div class="kpi-value {'positive' if sharpe_value >= 0 else 'negative'}">{sharpe_value:.2f}</div></div>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    # -----------------------------------------------------------------------------
+    # 3. PANTALLA DIVIDIDA (50/50)
+    # -----------------------------------------------------------------------------
+    col_left, col_right = st.columns([1, 1], gap="medium")
+
+    # --- COLUMNA IZQUIERDA: EDITOR DE CÓDIGO ---
+    with col_left:
+        st.markdown(
+            f'<div class="editor-header"><span class="dot">●</span> 📄 {etiqueta_principal}</div>',
+            unsafe_allow_html=True,
+        )
+
+        code_path = BASE_DIR / selected_script
+        code_content = read_script_source(selected_script)
+
+        editor_key = f"editor_{selected_script}"
+        needs_seed = (
+            editor_key not in st.session_state
+            or st.session_state.get("editor_loaded_for") != selected_script
+        )
+        if needs_seed:
+            # El modal "Abrir Estrategia" inyecta el contenido ya leído en codigo_actual
+            if st.session_state.get("codigo_actual_script") == selected_script and "codigo_actual" in st.session_state:
+                st.session_state[editor_key] = st.session_state["codigo_actual"]
+            else:
+                st.session_state[editor_key] = code_content
+            st.session_state["editor_loaded_for"] = selected_script
+
+        edited_code = st.text_area(
+            "Editar código Python:",
+            key=editor_key,
+            height=262,
+            label_visibility="collapsed",
+            on_change=persist_editor_code,
+            args=(selected_script, editor_key),
+        )
+
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
+        with btn_col1:
+            # «Guardar Cambios» requiere una ruta existente; «Guardar Como» admite
+            # crear un archivo nuevo cuando el editor contiene una estrategia válida.
+            save_clicked = st.button(
+                "💾 Guardar Cambios", use_container_width=True, key="btn_save",
+                disabled=sin_principal, help=("Abre una estrategia para poder guardar." if sin_principal else None),
+            )
+        with btn_col2:
+            run_clicked = st.button(
+                "▶ Ejecutar Backtest", type="primary", use_container_width=True, key="btn_run"
+            )
+        with btn_col3:
+            ai_clicked = st.button("🪄 Optimizar con IA", use_container_width=True, key="btn_ai")
+
+        if ai_clicked:
+            st.session_state["codigo_actual"] = edited_code
+            st.session_state["codigo_actual_script"] = selected_script
+            modal_ia_optimizar()
+
+        ai_hint = st.session_state.get("ai_instrucciones", "").strip()
+        st.caption(
+            f"🪄 Instrucción pendiente para la IA: {ai_hint}" if ai_hint else "🪄 Pulsa «Optimizar con IA» para revisar la estrategia."
+        )
+
+        render_draft_area(display_metrics(), asset, fast_period, slow_period, initial_cap)
+
+        st.markdown(
+            '<div class="panel" style="padding:10px 12px">'
+            '<div class="panel-title" style="margin-bottom:6px">💾 Guardar Como</div>',
+            unsafe_allow_html=True,
+        )
+        sa_col1, sa_col2 = st.columns([2, 1])
+        with sa_col1:
+            if not sin_principal and st.session_state.get(STRATEGY_CREATION_CODE_KEY):
+                default_save_as_name = str(
+                    st.session_state.get(STRATEGY_CREATION_FILENAME_KEY, "estrategia_nueva.py")
+                )
+            else:
+                default_save_as_name = (
+                    f"copia_{Path(selected_script).name}"
+                    if selected_script
+                    else "estrategia_nueva.py"
+                )
+            new_filename = st.text_input(
+                "Nuevo nombre (.py):",
+                value=default_save_as_name,
+                key="new_filename",
+                label_visibility="collapsed",
+            )
+        target_name = (
+            new_filename if new_filename.endswith(".py") else f"{new_filename}.py"
+        )
+        save_as_validation = validate_strategy_source(
+            edited_code,
+            target_name if is_valid_strategy_filename(target_name) else "estrategia.py",
+        )
+        save_as_enabled = bool(
+            save_as_validation["valid"] and is_valid_strategy_filename(target_name)
+        )
+        with sa_col2:
+            save_as_clicked = st.button(
+                "📝 Guardar Como",
+                use_container_width=True,
+                key="btn_save_as",
+                disabled=not save_as_enabled,
+            )
+        if not save_as_enabled:
+            missing = (
+                "Nombre de archivo no válido."
+                if not is_valid_strategy_filename(target_name)
+                else "El código no cumple el contrato estático: "
+                + " ".join(save_as_validation["errors"])
+            )
+            st.caption(f"Guardar Como no disponible · {missing}")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if save_clicked:
+            try:
+                code_path.write_text(edited_code, encoding="utf-8")
+            except OSError as exc:
+                st.error(f"❌ No se pudo guardar `{etiqueta_principal}`: {exc}")
+            else:
+                st.toast(f"💾 Guardado en `{etiqueta_principal}`", icon="✅")
+
+        if save_as_clicked:
+            try:
+                target = save_strategy_source(
+                    code_path.parent if selected_script else BASE_DIR,
+                    target_name,
+                    edited_code,
+                )
+            except OSError as exc:
+                if isinstance(exc, FileExistsError):
+                    st.error(f"`{target_name}` ya existe. Elige otro nombre; no se sobrescribió.")
+                else:
+                    st.error(f"❌ No se pudo crear `{target_name}`: {exc}")
+            except ValueError as exc:
+                st.error(f"No se pudo crear `{target_name}`: {exc}")
+            else:
+                relative = register_strategy_file(
+                    target, BASE_DIR, ALL_STRATEGIES
+                )
+                st.toast(f"📝 Creado `{target.name}`", icon="✅")
+                if edited_code == st.session_state.get(STRATEGY_CREATION_CODE_KEY):
+                    st.session_state[STRATEGY_CREATION_SAVED_PATH_KEY] = relative
+                    st.session_state[STRATEGY_CREATION_SAVED_CODE_KEY] = edited_code
+                st.rerun()
+
+        if run_clicked:
+            st.session_state["force_run"] = True
+            st.rerun()
+
+    # --- COLUMNA DERECHA: GRÁFICO INTERACTIVO ---
+    with col_right:
+        chart_head, view_col = st.columns([3.2, 1], vertical_alignment="center", gap="small")
+        with chart_head:
+            st.markdown(
+                f'<div class="panel-title">📈 Principal vs Comparativas · Benchmark ({asset})</div>',
+                unsafe_allow_html=True,
+            )
+        with view_col:
+            chart_view = st.segmented_control(
+                "Vista del patrimonio:",
+                EQUITY_VIEWS,
+                default=st.session_state.get(CHART_VIEW_KEY, "$"),
+                key=f"{CHART_VIEW_KEY}_widget",
+                label_visibility="collapsed",
+                help="Alterna entre dólares, retorno acumulado, base 100 y escala logarítmica.",
+            ) or st.session_state.get(CHART_VIEW_KEY, "$")
+        st.session_state[CHART_VIEW_KEY] = chart_view
+
+        draft_metrics, draft_equity = read_draft_curve(st.session_state)
+
+        # Las comparativas marcadas en el sidebar se ejecutan con los mismos parámetros.
+        compare_scripts = [s for s in st.session_state.get(COMPARE_KEY, []) if s != selected_script]
+        compare_results = get_comparative_results(
+            compare_scripts, asset, initial_cap
+        ) if compare_scripts else {}
+
+        comparative_curves = []
+        for script in compare_scripts[:MAX_COMPARATIVES]:
+            payload = compare_results.get(script) or {}
+            curve_df, curve_metrics = payload.get("df"), payload.get("metrics") or {}
+            comparative_curves.append({
+                "name": Path(script).name,
+                "script": script,
+                "equity": curve_df["Equity"] if curve_df is not None else pd.Series(dtype=float),
+                "metrics": curve_metrics,
+            })
+
+        fig = build_equity_figure(
+            df_res,
+            asset,
+            selected_script,
+            show_equity,
+            show_benchmark,
+            show_drawdown,
+            draft_metrics,
+            draft_equity,
+            comparative_curves,
+            chart_view,
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+        )
+
+        comparativas_ok = [c for c in comparative_curves if not c["metrics"].get("error")]
+        if comparativas_ok:
+            st.caption(
+                "🔵 Principal ⭐ · 🟠/🟢 comparativas marcadas con [x] · "
+                "⚪ Benchmark · 🟣 borrador de IA (si está en prueba)"
+            )
+        for item in comparative_curves:
+            if item["metrics"].get("error"):
+                st.error(f"❌ `{item['script']}`: {item['metrics']['error']}")
+        if draft_equity is not None and draft_metrics:
+            st.caption(
+                f"🧪 Curva violeta punteada = borrador de IA en prueba "
+                f"(Capital Final ${draft_metrics['equity']:,.2f})."
+            )
+
+        # El panel analiza exactamente las mismas métricas que muestra la barra de KPIs
+        values = display_metrics()
+
+
+    # -----------------------------------------------------------------------------
+    # 3b. TABLA COMPARATIVA DE MÉTRICAS (Principal vs Comparativas vs Benchmark)
+    # -----------------------------------------------------------------------------
+    st.markdown(
+        '<div class="panel-title" style="margin-top:10px">📊 Tabla Comparativa de Métricas</div>',
+        unsafe_allow_html=True,
+    )
+    tabla_comparativa = build_comparison_table(values, comparative_curves, asset)
+    st.dataframe(
+        tabla_comparativa,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Estrategia": st.column_config.TextColumn(width="medium"),
+            "Retorno %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Vs Principal": st.column_config.NumberColumn(format="%+.2f pts", help="Diferencia en puntos porcentuales contra la principal"),
+            "Sharpe": st.column_config.NumberColumn(format="%.2f"),
+            "Max Drawdown %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Comisiones $": st.column_config.NumberColumn(format="$%.2f", help="Comisión estimada (0.05 % del capital por fill)"),
+            "Fills": st.column_config.NumberColumn(format="%d", help="Cambios de exposición: entradas y salidas"),
+            "Error": st.column_config.TextColumn(width="medium"),
+        },
+    )
+
+    # -----------------------------------------------------------------------------
+    # 4. TERMINAL Y LOGS INFERIOR
+    # -----------------------------------------------------------------------------
+    st.markdown(
+        '<div class="panel-title" style="margin-top:6px">💻 Cloud Terminal &amp; Logs</div>',
+        unsafe_allow_html=True,
+    )
+
+    log_time = datetime.now().strftime("%H:%M:%S")
+    ts = f'<span class="t-dim">{log_time}</span>'
+    if metrics.get("standby"):
+        source_line = (
+            f'{ts} <span class="t-warn">[WAIT]</span> No strategy loaded — waiting for '
+            '«📂 Abrir Estrategia».'
+        )
+    else:
+        source_line = (
+            f'{ts} <span class="t-info">[INFO]</span> Fetched historical market data for '
+            f'<span class="t-key">{asset}</span> ({metrics["bars"]} daily bars).'
+            if live
+            else f'{ts} <span class="t-warn">[WARN]</span> Market feed unreachable — rendering reference snapshot.'
+        )
+    status_tone = "t-ok" if total_return_value >= 0 else "t-err"
+
+    st.markdown(
+        f"""
+    <div class="terminal-box">
+        {ts} <span class="t-info">[INFO]</span> Inicializando runtime de GABO · identificador interno del motor {ENGINE_VERSION}...<br>
+        {ts} <span class="t-info">[INFO]</span> Workspace mounted: <span class="t-key">C:\\QuantConnect\\projects\\quantlab</span><br>
+        {ts} <span class="t-info">[INFO]</span> Loaded strategy script: <span class="t-key">{etiqueta_principal}</span><br>
+        {ts} <span class="t-info">[INFO]</span> Parameters &rarr; Fast SMA: <span class="t-key">{fast_period}</span> | Slow SMA: <span class="t-key">{slow_period}</span> | Capital: <span class="t-key">${initial_cap:,.2f}</span><br>
+        {source_line}<br>
+        {ts} <span class="t-info">[INFO]</span> Simulation resolved <span class="t-key">{metrics["trades"]}</span> round-trip trades.<br>
+        {ts} <span class="t-ok">[SUCCESS]</span> Backtest deployed in 1.42 seconds. Total points processed: {metrics["bars"]} bar points.<br>
+        {ts} <span class="t-info">[INFO]</span> Fees: <span class="t-key">${metrics["fees"]:.2f}</span> | Volume: <span class="t-key">${metrics["volume"]:,.0f}</span> | Sharpe: <span class="t-key">{sharpe_value:.2f}</span><br>
+        {ts} <span class="{status_tone}">[STATUS]</span> Final Equity: <span class="t-key">${equity_value:,.2f}</span> ({total_return_value:.2f}%) &middot; Max DD: {drawdown_value:.2f}% &middot; Win Rate: {win_rate_value:.1f}%<br>
+        {ts} <span class="t-ok">[READY]</span> Cloud node idle. Awaiting next deployment...
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+# Navegación por selección para que solo se monte la vista activa y su contexto.
+st.radio(
+    "Navegación principal",
+    WORKSPACE_TABS,
+    key="workspace_tab",
+    horizontal=True,
+    label_visibility="collapsed",
+    format_func=lambda tab: f"🏠 {tab}" if tab == "INICIO" else tab,
 )
+active_workspace_tab = st.session_state["workspace_tab"]
+assistant_panel_ratio = normalize_assistant_panel_ratio(
+    st.session_state["assistant_panel_ratio"]
+)
+st.session_state["assistant_panel_ratio"] = assistant_panel_ratio
+divider_weight = 0.18
+assistant_panel_weight = (6 + divider_weight) * assistant_panel_ratio / (
+    1 - assistant_panel_ratio
+)
+with st.container(key="workspace-layout"):
+    center_column, assistant_resize_column, assistant_column = st.columns(
+        [6, divider_weight, assistant_panel_weight],
+        gap="small",
+        vertical_alignment="top",
+    )
+
+    with assistant_resize_column:
+        drag_value = _panel_resizer(
+            initial_ratio=assistant_panel_ratio,
+            initial_width=st.session_state["assistant_panel_width_px"],
+            default={"ratio": assistant_panel_ratio},
+            key="assistant_panel_resizer",
+        )
+        if isinstance(drag_value, dict):
+            requested_ratio = normalize_assistant_panel_ratio(
+                drag_value.get("ratio", assistant_panel_ratio)
+            )
+            requested_width = drag_value.get("width_px")
+            if isinstance(requested_width, (int, float)) and requested_width > 0:
+                st.session_state["assistant_panel_width_px"] = float(requested_width)
+            if abs(requested_ratio - assistant_panel_ratio) > 0.001:
+                st.session_state["assistant_panel_ratio"] = requested_ratio
+                st.rerun()
+
+    with center_column:
+        if active_workspace_tab == "LABORATORIO":
+            render_laboratorio_center()
+        else:
+            render_other_workspace(active_workspace_tab)
+
+    with assistant_column:
+        st.markdown(
+            '<div class="ai-panel-title">🤖 Asistente global</div>',
+            unsafe_allow_html=True,
+        )
+        sync_ai_config_state(TOPBAR_AI_PREFIX, ASSISTANT_AI_PREFIX)
+        with st.expander("⚙ Configurar agente y modelo de IA", expanded=False):
+            render_ai_provider_form(
+                ASSISTANT_AI_PREFIX,
+                on_change=sync_assistant_ai_config_to_canonical,
+            )
+        st.caption(f"Modelo seleccionado · {ai_config_from_state(TOPBAR_AI_PREFIX)['model']}")
+        assistant_mode = st.session_state.get(
+            ASSISTANT_MODE_KEY, ASSISTANT_MODE_GLOBAL
+        )
+        if assistant_mode == ASSISTANT_MODE_CREATE_STRATEGY:
+            render_strategy_creation_assistant()
+        else:
+            render_ai_backtest_panel(
+                display_metrics(), df_res, asset, fast_period, slow_period,
+                initial_cap, selected_script,
+            )
+            with st.container(border=True):
+                st.markdown("**Acciones contextuales**")
+                if active_workspace_tab == "LABORATORIO":
+                    st.caption(
+                        "Revisión y optimización existentes; usa el control de IA del editor."
+                    )
+                else:
+                    future_actions = {
+                        "INICIO": "Analizar panorama del mercado",
+                        "PATRONES Y DESCUBRIMIENTO": "Investigar patrones y eventos",
+                        "PORTAFOLIO": "Analizar posiciones y riesgo",
+                        "RESULTADOS Y ANÁLISIS": "Interpretar métricas",
+                        "HISTORIAL Y EXPERIMENTOS": "Explicar diferencias entre experimentos",
+                    }
+                    st.button(
+                        future_actions[active_workspace_tab],
+                        disabled=True,
+                        use_container_width=True,
+                        key="future_ai_action",
+                    )
+                    st.caption("Acción futura; todavía no ejecuta ninguna operación.")

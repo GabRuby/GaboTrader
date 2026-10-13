@@ -72,29 +72,18 @@ def poner_principal(sesion: AppTest, script: str) -> AppTest:
 
 
 # --------------------------------------------------------------------------- #
-# 1-3 · Principal cargada + ticker y capital del grupo 3
+# 1-3 · arranque sin Principal + ticker y capital del grupo 3 con los respaldos
 # --------------------------------------------------------------------------- #
-def test_pasos_1_a_3_principal_ticker_y_capital(at):
-    # 1 · la app arranca con una Principal ya seleccionada
-    assert at.session_state["principal_script"]
+def test_pasos_1_a_3_sin_principal_el_grupo_3_muestra_los_respaldos(at):
+    # 1 · desde G.3.7 la app arranca SIN Estrategia Principal.
+    assert at.session_state[app.PRINCIPAL_KEY] is None
     assert "compare_selection" in at.session_state
-    assert f"{at.session_state['principal_script']}" in " ".join(marcadores_del_sidebar(at))
 
-    # 2 y 3 · el grupo 3 muestra el ticker y el capital que declara el archivo.
-    # `crawling_fluorescent.py` no declara ninguno de los dos datos, asi que aqui
-    # se ven los respaldos TSLA y 100000.
-    selector = at.selectbox(key=app.ACTIVO_KEY)
-    capital = at.number_input(key=app.CAPITAL_KEY)
-    declarados = app.tickers_declarados(app.BASE_DIR / at.session_state["principal_script"])
-
-    assert selector.value == ("TSLA" if not declarados else declarados[0])
-    assert capital.value == 100_000.0
-    assert at.session_state[app.ACTIVO_KEY] == selector.value
-    assert at.session_state[app.CAPITAL_KEY] == capital.value
-    # El respaldo es el unico valor cuando el archivo no declara el dato.
-    if not declarados:
-        assert selector.value == app.DEFAULT_TICKER
-        assert capital.value == app.DEFAULT_CAPITAL
+    # 2 y 3 · sin archivo que leer, el grupo 3 enseña los valores de respaldo.
+    assert at.selectbox(key=app.ACTIVO_KEY).value == app.DEFAULT_TICKER
+    assert at.number_input(key=app.CAPITAL_KEY).value == app.DEFAULT_CAPITAL
+    assert at.session_state[app.ACTIVO_KEY] == at.selectbox(key=app.ACTIVO_KEY).value
+    assert at.session_state[app.CAPITAL_KEY] == at.number_input(key=app.CAPITAL_KEY).value
 
 
 # --------------------------------------------------------------------------- #
@@ -145,14 +134,17 @@ def test_paso_6_una_tercera_comparativa_no_se_acepta(at):
 # 7 · baja individual
 # --------------------------------------------------------------------------- #
 def test_paso_7_eliminar_una_comparativa(at):
+    principal_antes = at.session_state[app.PRINCIPAL_KEY]
+
     at.button(key="rm_comparativa_0").click().run()
 
     assert at.session_state[app.COMPARE_KEY] == [COMPARATIVA_B]
     assert any(COMPARATIVA_B in md for md in marcadores_del_sidebar(at))
     assert any("1 de 2" in c for c in captions_del_sidebar(at))
     assert not at.button(key="btn_add_comparativa").disabled
-    # Principal intacta: quitar una comparativa no cambia lo que se esta evaluando.
-    assert at.session_state[app.PRINCIPAL_KEY]
+    # La Principal queda como estaba: quitar una comparativa no cambia lo que se
+    # esta evaluando (con o sin Principal).
+    assert at.session_state[app.PRINCIPAL_KEY] == principal_antes
 
 
 # --------------------------------------------------------------------------- #
