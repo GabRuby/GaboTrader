@@ -1,0 +1,58 @@
+# Archivos de entorno y credenciales (¡NUNCA SUBIR A GIT!)
+.env
+.env.*
+*.pem
+*.key
+
+# Caché de Python y compilación
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Streamlit y archivos temporales de sesión
+.streamlit/secrets.toml
+
+# IDEs y Editores de código
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Archivos de SO y logs
+.DS_Store
+Thumbs.db
+*.log
+# Respaldos locales: conservar en el equipo, no publicar
+app.py.backup*
+*.backup_*
+
+# Archivos temporales locales
+respuesta.txt
+
+# Archivos de configuración local de Streamlit
+.streamlit/config.toml
+
+# Respaldos y artefactos de auditoría local
+*.bak
+*.backup
+*.backup_*
+*.recuperacion.tmp
+*.rescate_editor.txt
+diff_*.txt
+.pytest_cache/
+__pycache__/
+
+# Archivos Python compilados
+*.pyc
+*.pyo
+
+# Cachés anidadas
+**/__pycache__/
