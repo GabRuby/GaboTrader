@@ -364,11 +364,13 @@ def test_sin_principal_el_laboratorio_muestra_la_plantilla_sin_ejecutar(monkeypa
     assert "Plantilla inicial del Laboratorio" in headers
     assert "Borrador temporal" in headers
 
-    # Banner de bienvenida con la guía de pasos y la tarjeta explicativa.
+    # Banner de bienvenida con la guía de pasos y la explicación en el icono de información
+    # (ya no hay tarjeta grande sobre el editor: se movió al popover junto al título).
     markdown = " ".join(item.value for item in session.markdown)
     assert "Bienvenido al Laboratorio de Estrategias" in markdown
     assert 'class="lab-steps"' in markdown
-    assert 'class="lab-info-card"' in markdown
+    assert 'class="lab-info-card"' not in markdown
+    assert app.PLANTILLA_DESCRIPCION in markdown
 
     # Estado vacío: KPIs con guion, gráfica vacía, sin tabla y sin resultado guardado.
     kpis = " ".join(
@@ -391,3 +393,162 @@ def test_sin_principal_el_laboratorio_muestra_la_plantilla_sin_ejecutar(monkeypa
     session = session.button(key="btn_reset_plantilla_params").click().run()
     assert session.slider(key=f"{app.PLANTILLA_PARAM_PREFIX}fast_ma").value == 10
     assert session.slider(key=f"{app.PLANTILLA_PARAM_PREFIX}slow_ma").value == 50
+
+
+def _entrar_en_laboratorio():
+    session = AppTest.from_file(str(ROOT / "app.py"), default_timeout=180).run()
+    return session.radio(key="workspace_tab").set_value("LABORATORIO").run()
+
+
+def test_plantilla_simulaciones_registran_curvas_y_se_pueden_eliminar():
+    """«Simular» crea pruebas con curva y color propios, visibles y eliminables."""
+    session = _entrar_en_laboratorio()
+    assert not session.exception, [error.value for error in session.exception]
+
+    session = session.button(key="btn_simular_plantilla").click().run()
+    assert not session.exception, [error.value for error in session.exception]
+    registros = session.session_state[app.LAB_SIMS_KEY]
+    assert len(registros) == 1
+    assert registros[0]["label"] == "Prueba 1"
+    assert registros[0]["params"] == {"fast_ma": 10, "slow_ma": 50}
+    assert not registros[0]["equity"].empty
+    assert session.get("plotly_chart")
+    assert "Prueba 1" in " ".join(item.value for item in session.caption)
+
+    # Tarjeta compacta: línea de parámetros reales y capital final visible en la tarjeta.
+    captions = " ".join(item.value for item in session.caption)
+    markdown = " ".join(item.value for item in session.markdown)
+    assert "Parámetros: fast_ma=10 · slow_ma=50" in captions
+    capital_1 = f"${float(registros[0]['metrics']['equity']):,.2f}"
+    assert f"Capital final: {capital_1}" in markdown
+    assert "Prueba 1" in markdown
+
+    # Con un parámetro distinto se registra una segunda prueba con otro color y su capital.
+    session = session.slider(
+        key=f"{app.PLANTILLA_PARAM_PREFIX}fast_ma"
+    ).set_value(15).run()
+    session = session.button(key="btn_simular_plantilla").click().run()
+    registros = session.session_state[app.LAB_SIMS_KEY]
+    assert len(registros) == 2
+    assert registros[1]["params"]["fast_ma"] == 15
+    assert registros[0]["color"] != registros[1]["color"]
+    capital_2 = f"${float(registros[1]['metrics']['equity']):,.2f}"
+    assert capital_1 != capital_2
+    markdown = " ".join(item.value for item in session.markdown)
+    assert f"Capital final: {capital_1}" in markdown
+    assert f"Capital final: {capital_2}" in markdown
+
+    # Eliminar una prueba es inmediato: sin confirmación, sin advertencias y sin tooltip.
+    assert session.button(key="sim_del_1").help in (None, "")
+    session = session.button(key="sim_del_1").click().run()
+    assert not session.warning
+    assert [r["id"] for r in session.session_state[app.LAB_SIMS_KEY]] == [2]
+    assert app.LAB_SIM_DELETE_KEY not in session.session_state
+    assert session.get("plotly_chart")
+    markdown = " ".join(item.value for item in session.markdown)
+    assert capital_1 not in markdown
+    assert capital_2 in markdown
+
+
+def test_plantilla_paneles_de_informacion_muestran_metricas_propias():
+    """Cada panel «ⓘ» conserva las métricas secundarias reales de su propia prueba."""
+    session = _entrar_en_laboratorio()
+    session = session.button(key="btn_simular_plantilla").click().run()
+    session = session.slider(
+        key=f"{app.PLANTILLA_PARAM_PREFIX}fast_ma"
+    ).set_value(20).run()
+    session = session.button(key="btn_simular_plantilla").click().run()
+    registros = session.session_state[app.LAB_SIMS_KEY]
+    assert [r["id"] for r in registros] == [1, 2]
+    markdown = " ".join(item.value for item in session.markdown)
+    for registro in registros:
+        met = registro["metrics"]
+        for etiqueta, valor in (
+            ("Retorno total", f"{float(met['total_return']):.2f}%"),
+            ("Sharpe", f"{float(met['sharpe']):.2f}"),
+            ("Máximo drawdown", f"{float(met['max_drawdown']):.2f}%"),
+            ("Operaciones", str(int(met["trades"]))),
+            ("Comisiones", f"${float(met['fees']):,.2f}"),
+            ("Capital final", f"${float(met['equity']):,.2f}"),
+        ):
+            fila = (
+                f'<span class="sim-info-k">{etiqueta}</span>'
+                f'<span class="sim-info-v">{valor}</span>'
+            )
+            assert fila in markdown
+    # El panel no usa el interlineado por defecto de Streamlit (filas propias compactas).
+    assert 'class="sim-info"' in markdown
+    # El icono de información no expone tooltip en el control de la tarjeta.
+    assert session.button(key="sim_del_1").help in (None, "")
+
+
+def test_plantilla_conserva_resultado_y_avisa_de_desactualizacion():
+    """Ejecutar guarda el resultado; cambiar un parámetro no lo borra, solo lo marca."""
+    session = _entrar_en_laboratorio()
+    session = session.button(key="btn_run_plantilla").click().run()
+    assert not session.exception, [error.value for error in session.exception]
+    assert session.session_state.get(app.PLANTILLA_RESULT_KEY)
+    assert not any("ejecución anterior" in item.value for item in session.info)
+
+    session = session.slider(
+        key=f"{app.PLANTILLA_PARAM_PREFIX}fast_ma"
+    ).set_value(20).run()
+    assert session.session_state.get(app.PLANTILLA_RESULT_KEY)
+    assert any("ejecución anterior" in item.value for item in session.info)
+
+
+def test_plantilla_guardar_como_dialogo_abre_y_cancela():
+    """«Guardar como…» abre un diálogo con validación y permite cancelar sin escribir."""
+    session = _entrar_en_laboratorio()
+    session = session.button(key="btn_save_as_plantilla").click().run()
+    assert not session.exception, [error.value for error in session.exception]
+    assert session.session_state.get(app.LAB_SAVE_AS_OPEN_KEY)
+    assert not session.button(key="plantilla_save_as_confirmar").disabled
+
+    session = session.button(key="plantilla_save_as_cancelar").click().run()
+    assert not session.session_state.get(app.LAB_SAVE_AS_OPEN_KEY)
+    assert not (ROOT / "mi_estrategia.py").exists()
+
+
+def test_plantilla_optimizacion_genera_propuesta_y_la_descarta():
+    """«Optimizar variables con IA» propone parámetros y se puede descartar."""
+    session = _entrar_en_laboratorio()
+    ai_button = session.button(key="btn_ai_plantilla")
+    assert ai_button.label == "✨ Optimizar variables con IA"
+    assert not ai_button.disabled
+    session = ai_button.click().run()
+    assert not session.exception, [error.value for error in session.exception]
+    assert session.session_state.get(app.LAB_OPT_KEY)
+    # El capital final sugerido se destaca y no se registra ninguna prueba interna.
+    markdown = " ".join(item.value for item in session.markdown)
+    assert "Capital final sugerido (ajuste):" in markdown
+    assert not session.session_state.get(app.LAB_SIMS_KEY)
+    assert session.button(key="lab_opt_aceptar").label == "Aceptar propuesta"
+    session = session.button(key="lab_opt_descartar").click().run()
+    assert not session.session_state.get(app.LAB_OPT_KEY)
+
+
+def test_plantilla_optimizacion_aceptar_no_crea_simulacion():
+    """Aceptar la propuesta vuelca los parámetros pero no ejecuta una prueba visible."""
+    session = _entrar_en_laboratorio()
+    session.session_state[app.LAB_OPT_KEY] = {
+        "actual": {"fast_ma": 10, "slow_ma": 50},
+        "sugerido": {"fast_ma": 12, "slow_ma": 60},
+        "optimizados": ["fast_ma", "slow_ma"],
+        "metricas_actual": None,
+        "metricas_sugerido": None,
+        "metricas_validacion": None,
+        "criterio": "Mayor Sharpe en el ajuste.",
+        "periodos": {"ajuste": ("2020-01-01", "2024-06-30"),
+                     "validacion": ("2024-07-01", "2026-09-30")},
+        "evaluadas": 4,
+        "truncado": False,
+    }
+    session = session.run()
+    session = session.button(key="lab_opt_aceptar").click().run()
+    assert session.slider(key=f"{app.PLANTILLA_PARAM_PREFIX}fast_ma").value == 12
+    assert session.slider(key=f"{app.PLANTILLA_PARAM_PREFIX}slow_ma").value == 60
+    assert app.LAB_OPT_KEY not in session.session_state
+    # Sin pulsar «Simular» no hay prueba registrada ni curva comparativa nueva.
+    assert not session.session_state.get(app.LAB_SIMS_KEY)
+    assert any("Parámetros sugeridos aplicados" in item.value for item in session.success)

@@ -815,17 +815,6 @@ st.markdown(
         width: 18px; height: 18px; border-radius: 50%;
         background: #2563eb; color: #ffffff; font-size: 11px;
     }
-    .lab-info-card {
-        border: 1px solid #e2e8f0; border-left: 3px solid #2563eb;
-        border-radius: 8px; background: #f8fafc;
-        padding: 10px 13px; margin: 8px 0 10px;
-    }
-    .lab-info-card .lab-info-title {
-        font-size: 12.5px; font-weight: 700; color: #1e3a8a; margin-bottom: 3px;
-    }
-    .lab-info-card .lab-info-body {
-        font-size: 12px; color: #475569; line-height: 1.5;
-    }
     .lab-empty-chart {
         border: 1px dashed #cbd5e1; border-radius: 10px; background: #f8fafc;
         padding: 34px 20px; text-align: center; color: #64748b; margin-bottom: 8px;
@@ -834,6 +823,83 @@ st.markdown(
         font-size: 15px; font-weight: 700; color: #94a3b8; margin-bottom: 6px;
     }
     .lab-empty-chart .lab-empty-body { font-size: 12px; color: #94a3b8; }
+    .sim-title {
+        display: flex; align-items: center; gap: 7px; min-width: 0;
+        font-size: 12.5px; font-weight: 600; color: #0f172a;
+    }
+    .sim-title .sim-dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        display: inline-block; flex: 0 0 auto; box-shadow: 0 0 0 2px #ffffff;
+    }
+    .sim-title > span:last-child {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sim-title b { color: #2563eb; font-size: 10.5px; font-weight: 700; }
+    .sim-capital {
+        font-size: 15px; font-weight: 700; color: #15803d;
+        margin: 2px 0 8px;
+    }
+    /* Icono de información de cada prueba: círculo compacto con «ⓘ», sin flecha de
+       desplegable (el chevron nativo se oculta) y sin tooltip. */
+    [class*="st-key-sim_info_"] [data-testid="stPopover"] { width: auto; }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverButton"] {
+        width: 26px; height: 26px; min-width: 26px; min-height: 26px; padding: 0; gap: 0;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 50%; border: 1px solid #cbd5e1; background: #eef2f7;
+        color: #475569; font-size: 13px; font-weight: 700; line-height: 1; box-shadow: none;
+    }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverButton"] div[aria-hidden="true"] {
+        display: none;
+    }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverButton"] div:has(> div[aria-hidden="true"]) {
+        margin: 0; padding: 0; gap: 0;
+    }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverButton"] p {
+        margin: 0; padding: 0; font-size: 13px; font-weight: 700; line-height: 1; color: inherit;
+    }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverButton"]:hover,
+    [class*="st-key-sim_info_"] [data-testid="stPopoverButton"]:focus-visible {
+        background: #e2e8f0; border-color: #94a3b8; color: #334155;
+    }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverButton"]:focus-visible {
+        outline: none; box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #93c5fd;
+    }
+    /* Panel de información de una prueba: métricas en filas compactas (etiqueta a la
+       izquierda, valor a la derecha) con interlineado y márgenes mínimos. Solo afecta a
+       este panel; el resto de la aplicación conserva su interlineado. */
+    [class*="st-key-sim_info_"] [data-testid="stPopoverBody"] { padding: 10px 12px; }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {
+        gap: 2px;
+    }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverBody"] [data-testid="stMarkdown"] {
+        margin: 0;
+    }
+    [class*="st-key-sim_info_"] [data-testid="stPopoverBody"] [data-testid="stMarkdownContainer"] p {
+        margin: 0;
+    }
+    .sim-info { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; }
+    .sim-info-row {
+        display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+        margin: 0; padding: 0; line-height: 1.3; font-size: 12.5px;
+    }
+    .sim-info-k { color: #64748b; font-weight: 600; }
+    .sim-info-v {
+        color: #0f172a; font-weight: 700; font-variant-numeric: tabular-nums;
+        text-align: right; white-space: nowrap;
+    }
+    .sim-info-capital .sim-info-v { color: #15803d; }
+    .sim-info-fecha .sim-info-k, .sim-info-fecha .sim-info-v {
+        color: #94a3b8; font-weight: 500;
+    }
+    /* Fila de acciones de la plantilla: el botón de IA necesita más ancho para que su
+       texto completo «✨ Optimizar variables con IA» no se trunque. */
+    .st-key-btn_ai_plantilla button {
+        white-space: normal; line-height: 1.15; padding-top: 5px; padding-bottom: 5px;
+        font-size: 12.5px;
+    }
+    .st-key-btn_ai_plantilla button p {
+        white-space: normal; overflow: visible; text-overflow: clip;
+    }
 
     @media (max-width: 800px) {
         .block-container { padding: 3.25rem 0.6rem 0.5rem; }
@@ -981,16 +1047,28 @@ def validate_strategy_source(source: str, filename: str = "estrategia.py") -> di
     }
 
 
-def save_strategy_source(base: Path, filename: str, source: str) -> Path:
-    """Create a validated strategy file exclusively; never overwrite an existing file."""
+def save_strategy_source(base: Path, filename: str, source: str, overwrite: bool = False) -> Path:
+    """Create a validated strategy file. Only overwrites when `overwrite` is explicit.
+
+    Por defecto nunca pisa un archivo existente (protege el catálogo). El flujo
+    «Guardar como…» del Laboratorio pide confirmación explícita al usuario antes de
+    llamar aquí con `overwrite=True`; sin esa confirmación se mantiene la protección.
+    """
     if not is_valid_strategy_filename(filename):
         raise ValueError("El nombre debe ser un único archivo Python válido terminado en `.py`.")
     target = base / filename
-    if target.exists():
+    if target.exists() and not overwrite:
         raise FileExistsError(f"El archivo ya existe: {target}")
     validation = validate_strategy_source(source, filename)
     if not validation["valid"]:
         raise ValueError("El código no cumple el contrato estático: " + " ".join(validation["errors"]))
+
+    if overwrite and target.exists():
+        try:
+            target.write_text(source, encoding="utf-8", newline="\n")
+        except OSError as write_error:
+            raise OSError(f"No se pudo sobrescribir el archivo: {write_error}") from write_error
+        return target
 
     created = False
     try:
@@ -1052,6 +1130,38 @@ PLANTILLA_EDITOR_KEY = "plantilla_inicial_editor"
 PLANTILLA_RESULT_KEY = "plantilla_inicial_backtest"
 PLANTILLA_PARAMS_KEY = "plantilla_inicial_params"
 PLANTILLA_PARAM_PREFIX = "plantilla_param_"
+
+# Texto explicativo de la plantilla. Antes ocupaba una tarjeta grande sobre el editor;
+# ahora se muestra al pulsar el icono de información, junto al título.
+PLANTILLA_DESCRIPCION = (
+    "Es una estrategia sencilla de cruce de promedios móviles (SMA). Calcula un "
+    "promedio rápido y otro lento del precio de cierre y genera señales según la "
+    "relación entre ambos. Puedes cambiar sus parámetros, modificar el código o pegar "
+    "una estrategia creada con ayuda de IA."
+)
+
+# Estado del refinamiento del Laboratorio: historial de simulaciones, diálogo de
+# «Guardar como…» y propuesta de optimización. Todo vive ÚNICAMENTE en `st.session_state`
+# durante la sesión; no hay persistencia en disco ni supervivencia a un reinicio.
+LAB_SIMS_KEY = "lab_simulaciones"
+LAB_SIM_COUNTER_KEY = "lab_sim_counter"
+LAB_SIM_DELETE_KEY = "lab_sim_pendiente_borrar"
+LAB_SAVE_AS_OPEN_KEY = "plantilla_save_as_open"
+LAB_SAVE_AS_OVERWRITE_KEY = "plantilla_save_as_confirmado"
+LAB_OPT_KEY = "lab_optimizacion"
+LAB_OPT_ACEPTADA_KEY = "lab_optimizacion_aceptada"
+
+# Paleta acotada de colores para las curvas de simulación. Se asigna un color libre a
+# cada prueba nueva y se conserva de forma estable en el registro, la leyenda y la curva.
+LAB_SIM_COLORS = [
+    "#e11d48", "#0ea5e9", "#16a34a", "#f59e0b", "#9333ea", "#0d9488",
+    "#dc2626", "#2563eb", "#ca8a04", "#db2777", "#4f46e5", "#65a30d",
+]
+# Tope de registros conservados y de curvas dibujadas a la vez, para que la leyenda no
+# se vuelva ilegible. No se inventan datos: solo se limita cuántas pruebas se ven.
+MAX_SIMULATION_RECORDS = 30
+MAX_SIMULATION_CURVES = 12
+MAX_OPTIMIZACION_COMBINACIONES = 24
 
 # Registro EXPLÍCITO y acotado de las variables ajustables de la plantilla inicial.
 # No se inventan parámetros ni se edita el Python de la estrategia: `strategy_parser`
@@ -3075,31 +3185,47 @@ def resultado_en_espera(ticker, capital):
     return df, metrics
 
 
-def _resultado_plantilla(ticker, capital, force=False):
-    """Resultado del borrador temporal (plantilla inicial) ya ejecutado, o `None`.
-
-    El borrador vive solo en `st.session_state`, así que no hay archivo que leer. Se
-    invalida igual que la Principal: por parámetros (ticker, capital, overrides) y por el
-    hash del código editado. Así, cambiar el activo, el capital, un parámetro o el propio
-    texto devuelve el laboratorio al estado de espera hasta que se vuelva a ejecutar.
-    """
-    stored = st.session_state.get(PLANTILLA_RESULT_KEY)
-    if not stored:
-        return None
+def _sello_plantilla(ticker, capital) -> tuple:
+    """Huella de la configuración vigente del borrador: activo, capital, parámetros y código."""
     code = str(
         st.session_state.get(PLANTILLA_EDITOR_KEY)
         or st.session_state.get(PLANTILLA_CODE_KEY)
         or ""
     )
-    params = (
+    return (
         ticker,
         float(capital),
         _sello_parametros(),
         hashlib.sha256(code.encode("utf-8")).hexdigest(),
     )
-    if not force and st.session_state.get(PLANTILLA_PARAMS_KEY) != params:
+
+
+def _resultado_plantilla(ticker, capital, force=False):
+    """Resultado del borrador temporal (plantilla inicial) ya ejecutado, o `None`.
+
+    El borrador vive solo en `st.session_state`, así que no hay archivo que leer. A
+    diferencia de antes, cambiar el activo, el capital, un parámetro o el propio texto NO
+    borra las métricas ni la gráfica: se conserva el último resultado válido y la interfaz
+    lo marca como correspondiente a una ejecución anterior con
+    `plantilla_resultado_desactualizado`. Solo se vuelve al estado de espera si nunca se
+    ejecutó nada.
+    """
+    stored = st.session_state.get(PLANTILLA_RESULT_KEY)
+    if not stored:
         return None
     return stored["df"], stored["metrics"]
+
+
+def plantilla_resultado_desactualizado(ticker, capital) -> bool:
+    """¿Los resultados guardados corresponden a otra configuración que la actual?
+
+    Devuelve `False` si no hay resultado guardado (nada que marcar) o si la huella guardada
+    coincide con la vigente. `True` significa que el activo, el capital, los parámetros o el
+    código cambiaron desde la última ejecución y el resultado mostrado es anterior.
+    """
+    if not st.session_state.get(PLANTILLA_RESULT_KEY):
+        return False
+    return st.session_state.get(PLANTILLA_PARAMS_KEY) != _sello_plantilla(ticker, capital)
 
 
 def get_backtest_result(ticker, capital, force=False):
@@ -5112,10 +5238,15 @@ def _ejecutar_plantilla(asset, initial_cap) -> None:
     st.rerun()
 
 
-def _guardar_plantilla_como(source: str, target_name: str) -> None:
-    """Guarda la plantilla como archivo nuevo y la promueve a Estrategia Principal."""
+def _guardar_plantilla_como(source: str, target_name: str, overwrite: bool = False) -> None:
+    """Guarda la plantilla como archivo nuevo y la promueve a Estrategia Principal.
+
+    `overwrite` solo llega en `True` cuando el diálogo «Guardar como…» ya confirmó la
+    sobrescritura de un archivo existente; sin esa confirmación `save_strategy_source`
+    protege el catálogo y rechaza pisar el archivo.
+    """
     try:
-        target = save_strategy_source(BASE_DIR, target_name, source)
+        target = save_strategy_source(BASE_DIR, target_name, source, overwrite=overwrite)
     except (OSError, ValueError) as exc:
         st.error(f"No se pudo guardar `{target_name}`: {exc}")
         return
@@ -5138,6 +5269,75 @@ def _guardar_plantilla_como(source: str, target_name: str) -> None:
     st.rerun()
 
 
+@st.dialog("Guardar estrategia como…")
+def _plantilla_save_as_dialog(source: str) -> None:
+    """Diálogo «Guardar como…» del borrador: valida nombre y pide confirmar si existe.
+
+    No escribe nada por sí mismo: al confirmar cierra sus banderas y delega en
+    `_guardar_plantilla_como`, que crea el archivo, lo registra y lo abre como Principal.
+    """
+    st.caption(
+        "Crea un archivo Python nuevo con el código del borrador y lo abre como "
+        "Estrategia Principal. La plantilla temporal no se modifica."
+    )
+    new_filename = st.text_input(
+        "Nombre del archivo nuevo (.py)",
+        value=st.session_state.get("plantilla_save_as_name", "mi_estrategia.py"),
+        key="plantilla_save_as_filename",
+    )
+    target_name = new_filename if new_filename.endswith(".py") else f"{new_filename}.py"
+    nombre_valido = is_valid_strategy_filename(target_name)
+    validacion = validate_strategy_source(
+        source,
+        target_name if nombre_valido else "estrategia.py",
+    )
+    target_path = BASE_DIR / target_name
+    existe = nombre_valido and target_path.exists()
+
+    if not validacion["valid"]:
+        st.error(
+            "El código del borrador no cumple el contrato: "
+            + " ".join(validacion["errors"])
+        )
+    elif not nombre_valido:
+        st.error("Indica un único archivo Python terminado en `.py`.")
+    elif existe:
+        st.warning(f"`{target_name}` ya existe en el catálogo del proyecto.")
+
+    confirmado = False
+    if existe:
+        confirmado = st.checkbox(
+            f"Confirmo sobrescribir `{target_name}`",
+            key=LAB_SAVE_AS_OVERWRITE_KEY,
+        )
+    puede_guardar = validacion["valid"] and nombre_valido and (not existe or confirmado)
+
+    guardar_col, cancelar_col = st.columns(2)
+    with guardar_col:
+        guardar = st.button(
+            "Guardar y abrir",
+            key="plantilla_save_as_confirmar",
+            type="primary",
+            use_container_width=True,
+            disabled=not puede_guardar,
+        )
+    with cancelar_col:
+        cancelar = st.button(
+            "Cancelar",
+            key="plantilla_save_as_cancelar",
+            use_container_width=True,
+        )
+    if cancelar:
+        st.session_state.pop(LAB_SAVE_AS_OPEN_KEY, None)
+        st.session_state.pop(LAB_SAVE_AS_OVERWRITE_KEY, None)
+        st.rerun()
+    if guardar:
+        st.session_state["plantilla_save_as_name"] = target_name
+        st.session_state.pop(LAB_SAVE_AS_OPEN_KEY, None)
+        st.session_state.pop(LAB_SAVE_AS_OVERWRITE_KEY, None)
+        _guardar_plantilla_como(source, target_name, overwrite=existe)
+
+
 def _reset_plantilla_parametros() -> None:
     """Devuelve los controles del borrador a los valores por defecto de la plantilla.
 
@@ -5156,26 +5356,572 @@ def _reset_plantilla_parametros() -> None:
         st.session_state[f"{PLANTILLA_PARAM_PREFIX}{parametro.nombre}"] = spec["default"]
 
 
-def render_plantilla_variables(source: str) -> dict:
+# -----------------------------------------------------------------------------
+# SIMULACIONES COMPARATIVAS DEL LABORATORIO
+# -----------------------------------------------------------------------------
+# Cada pulsación de «Simular» ejecuta la estrategia vigente en el mismo motor que el
+# backtest y registra UNA prueba independiente: parámetros usados, métricas reales, curva
+# de capital y un color estable. Las pruebas viven solo en `st.session_state` durante la
+# sesión: no se persisten en disco ni sobreviven a un reinicio de la aplicación.
+
+def _formato_valor_param(valor) -> str:
+    """Formatea un valor de parámetro sin decimales ficticios."""
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return str(valor)
+    if numero.is_integer():
+        return str(int(numero))
+    return f"{numero:.4g}"
+
+
+def _formato_parametros(params) -> str:
+    """Resumen legible de un diccionario de parámetros `nombre=valor`."""
+    if not params:
+        return "sin parámetros"
+    return " · ".join(
+        f"{clave}={_formato_valor_param(valor)}" for clave, valor in params.items()
+    )
+
+
+def _siguiente_color_simulacion(registros) -> str:
+    """Primer color de la paleta que no esté en uso; si todos lo están, cicla."""
+    usados = {registro.get("color") for registro in registros}
+    for color in LAB_SIM_COLORS:
+        if color not in usados:
+            return color
+    return LAB_SIM_COLORS[len(registros) % len(LAB_SIM_COLORS)]
+
+
+def registrar_simulacion(frame, metrics, asset, script, source, parametros) -> dict:
+    """Añade una prueba independiente al historial y devuelve su registro."""
+    registros = list(st.session_state.get(LAB_SIMS_KEY) or [])
+    contador = int(st.session_state.get(LAB_SIM_COUNTER_KEY, 0)) + 1
+    st.session_state[LAB_SIM_COUNTER_KEY] = contador
+    equity = None
+    if frame is not None and "Equity" in getattr(frame, "columns", []):
+        equity = frame["Equity"].copy()
+    ahora = datetime.now()
+    registro = {
+        "id": contador,
+        "label": f"Prueba {contador}",
+        "color": _siguiente_color_simulacion(registros),
+        "fecha": ahora.strftime("%Y-%m-%d %H:%M:%S"),
+        "hora": ahora.strftime("%H:%M:%S"),
+        "params": dict(parametros or {}),
+        "metrics": dict(metrics or {}),
+        "equity": equity,
+        "asset": str(asset),
+        "script": script or "",
+        "code_hash": hashlib.sha256(str(source or "").encode("utf-8")).hexdigest(),
+    }
+    registros.append(registro)
+    if len(registros) > MAX_SIMULATION_RECORDS:
+        registros = registros[-MAX_SIMULATION_RECORDS:]
+    st.session_state[LAB_SIMS_KEY] = registros
+    return registro
+
+
+def _simular_plantilla(source: str, asset, initial_cap) -> None:
+    """Ejecuta una simulación visible con el código y los parámetros actuales."""
+    source = str(source or "")
+    if not source.strip():
+        st.warning("La plantilla está vacía: no hay nada que simular.")
+        return
+    validacion = validate_strategy_source(source, "plantilla_inicial.py")
+    if not validacion["valid"]:
+        st.error("No se puede simular: " + " ".join(validacion["errors"]))
+        return
+    with st.spinner("Ejecutando una simulación con los parámetros actuales…"):
+        try:
+            frame, sim_metrics = run_source_backtest(
+                source, asset, initial_cap, "Simulación"
+            )
+        except Exception as exc:  # noqa: BLE001 - la estrategia es código editable
+            st.error(f"La simulación falló: {type(exc).__name__}: {exc}")
+            return
+    registrar_simulacion(
+        frame, sim_metrics, asset, "", source, dict(PARAMETROS_ACTIVOS)
+    )
+    st.toast(
+        "Prueba registrada. Se añadió una curva a la gráfica comparativa.",
+        icon="✅",
+    )
+    st.rerun()
+
+
+def simulaciones_curvas(script: str = "") -> list:
+    """Traduce las pruebas registradas en curvas comparables para la gráfica."""
+    registros = [
+        registro
+        for registro in (st.session_state.get(LAB_SIMS_KEY) or [])
+        if str(registro.get("script", "")) == script
+    ]
+    curvas = []
+    for registro in registros[-MAX_SIMULATION_CURVES:]:
+        equity = registro.get("equity")
+        if equity is None or getattr(equity, "empty", False):
+            continue
+        curvas.append(
+            {
+                "name": registro.get("label", "Prueba"),
+                "legend": (
+                    f"{registro.get('label', 'Prueba')} · "
+                    f"{_formato_parametros(registro.get('params'))}"
+                ),
+                "equity": equity,
+                "metrics": registro.get("metrics") or {},
+                "color": registro.get("color"),
+                "is_simulation": True,
+            }
+        )
+    return curvas
+
+
+def eliminar_simulacion(sim_id) -> None:
+    """Elimina únicamente la prueba indicada y limpia la confirmación pendiente."""
+    registros = [
+        registro
+        for registro in (st.session_state.get(LAB_SIMS_KEY) or [])
+        if registro.get("id") != sim_id
+    ]
+    st.session_state[LAB_SIMS_KEY] = registros
+    st.session_state.pop(LAB_SIM_DELETE_KEY, None)
+
+
+def _metricas_simulacion(met) -> list:
+    """Métricas secundarias de una prueba, como pares `(etiqueta, valor)` listos para pintar.
+
+    El capital final NO entra aquí: se destaca aparte. Todos los valores salen de la prueba
+    seleccionada; si el motor reportó un error se devuelve una lista vacía.
+    """
+    met = met or {}
+    if met.get("error"):
+        return []
+    return [
+        ("Retorno total", f"{float(met.get('total_return', 0.0)):.2f}%"),
+        ("Sharpe", f"{float(met.get('sharpe', 0.0)):.2f}"),
+        ("Máximo drawdown", f"{float(met.get('max_drawdown', 0.0)):.2f}%"),
+        ("Operaciones", str(int(met.get("trades", 0)))),
+        ("Comisiones", f"${float(met.get('fees', 0.0)):,.2f}"),
+    ]
+
+
+def _fila_info(etiqueta, valor, clase: str = "") -> str:
+    """Una fila compacta `etiqueta · valor` del panel de información de una prueba."""
+    extra = f" {clase}" if clase else ""
+    return (
+        f'<div class="sim-info-row{extra}">'
+        f'<span class="sim-info-k">{escape(str(etiqueta))}</span>'
+        f'<span class="sim-info-v">{escape(str(valor))}</span></div>'
+    )
+
+
+def render_simulaciones_panel(script: str = "") -> None:
+    """Panel «Pruebas ejecutadas»: tarjetas compactas por prueba.
+
+    Línea 1: punto de color, nombre (`Prueba N · Actual`), icono de información `ⓘ` y
+    papelera `🗑` alineada a la derecha. Línea 2: los parámetros reales de esa prueba.
+    Línea 3: el capital final de esa prueba, siempre visible y destacado. Las métricas
+    secundarias viven dentro del panel `ⓘ`. La papelera elimina la prueba de inmediato,
+    sin confirmación ni advertencias, conservando el resto y sus curvas.
+    """
+    registros = [
+        registro
+        for registro in (st.session_state.get(LAB_SIMS_KEY) or [])
+        if str(registro.get("script", "")) == script
+    ]
+    st.markdown("**🧪 Pruebas ejecutadas**")
+    if not registros:
+        st.caption(
+            "Aún no hay simulaciones. Pulsa «Simular» para registrar una prueba con los "
+            "parámetros actuales."
+        )
+        return
+    ultimo_id = registros[-1].get("id")
+    for registro in reversed(registros):
+        sim_id = registro.get("id")
+        met = registro.get("metrics") or {}
+        with st.container(border=True):
+            titulo_col, info_col, borrar_col = st.columns(
+                [0.66, 0.16, 0.18], vertical_alignment="center", gap="small"
+            )
+            with titulo_col:
+                etiqueta = escape(str(registro.get("label", "Prueba")))
+                if sim_id == ultimo_id:
+                    etiqueta += " · <b>Actual</b>"
+                st.markdown(
+                    '<div class="sim-title">'
+                    f'<span class="sim-dot" style="background:{registro.get("color", "#94a3b8")}"></span>'
+                    f"<span>{etiqueta}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            with info_col:
+                with st.popover("ⓘ", key=f"sim_info_{sim_id}"):
+                    if met.get("error"):
+                        st.error(f"Error: {met['error']}")
+                    else:
+                        filas = "".join(
+                            _fila_info(etiqueta_metrica, valor)
+                            for etiqueta_metrica, valor in _metricas_simulacion(met)
+                        )
+                        filas += _fila_info(
+                            "Capital final", _capital_final_texto(met), "sim-info-capital"
+                        )
+                        fecha = registro.get("fecha", registro.get("hora", ""))
+                        if fecha:
+                            filas += _fila_info(
+                                "🕒 Ejecutada", fecha, "sim-info-fecha"
+                            )
+                        st.markdown(
+                            f'<div class="sim-info">{filas}</div>',
+                            unsafe_allow_html=True,
+                        )
+            with borrar_col:
+                if st.button(
+                    "🗑",
+                    key=f"sim_del_{sim_id}",
+                    use_container_width=True,
+                ):
+                    eliminar_simulacion(sim_id)
+                    st.rerun()
+            st.caption("Parámetros: " + _formato_parametros(registro.get("params")))
+            st.markdown(
+                '<div class="sim-capital">Capital final: '
+                f"{_capital_final_texto(met)}</div>",
+                unsafe_allow_html=True,
+            )
+
+
+# -----------------------------------------------------------------------------
+# OPTIMIZACIÓN DE PARÁMETROS («Optimizar con IA»)
+# -----------------------------------------------------------------------------
+# Evalúa combinaciones de parámetros en el MISMO motor, sin registrarlas como pruebas ni
+# añadir curvas visibles, y presenta una propuesta que el usuario puede aceptar o
+# descartar. Usa un periodo de ajuste y otro de validación cuando la estrategia declara
+# (o hereda) fechas: la selección se hace sobre el ajuste y la validación solo se reporta.
+
+def _periodos_optimizacion(source: str):
+    """Divide el rango vigente en ajuste (70 %) y validación (30 %) sin solaparlos."""
+    info = strategy_parser.analizar_fuente(source, nombre="plantilla_inicial.py")
+    inicio = pd.Timestamp(info.fecha_inicio or "2020-01-01")
+    fin = pd.Timestamp(info.fecha_fin or "2026-09-30")
+    if fin <= inicio:
+        fin = inicio + pd.DateOffset(years=1)
+    corte = (inicio + (fin - inicio) * 0.7).normalize()
+    validacion_inicio = corte + pd.Timedelta(days=1)
+    if validacion_inicio > fin:
+        validacion_inicio = fin
+    return (
+        inicio.strftime("%Y-%m-%d"),
+        corte.strftime("%Y-%m-%d"),
+        validacion_inicio.strftime("%Y-%m-%d"),
+        fin.strftime("%Y-%m-%d"),
+    )
+
+
+def _candidatos_parametro(parametro, spec) -> list:
+    """Valores representativos de un parámetro: mínimo, máximo, centro y por defecto."""
+    minimo = float(spec["min"])
+    maximo = float(spec["max"])
+    paso = float(spec["step"]) or 1.0
+    crudos = [float(spec["default"]), minimo, maximo, (minimo + maximo) / 2.0]
+    if parametro.valor is not None:
+        crudos.append(float(parametro.valor))
+    valores: list = []
+    for v in crudos:
+        v = max(minimo, min(maximo, v))
+        if parametro.es_entero:
+            # Entero nativo, no `float(round(...))`: el motor inyecta el valor tal cual
+            # en la firma de `run_strategy` y `DataFrame.rolling(window=...)` exige un
+            # `int` (con `1.0` pandas lanza «window must be an integer»).
+            v = int(round(v))
+        else:
+            pasos = round((v - minimo) / paso)
+            v = max(minimo, min(maximo, minimo + pasos * paso))
+        if v not in valores:
+            valores.append(v)
+    valores.sort()
+    if len(valores) > 4:
+        indices = [0, len(valores) // 3, (2 * len(valores)) // 3, len(valores) - 1]
+        valores = [valores[i] for i in dict.fromkeys(indices)]
+    return valores
+
+
+def _criterio_optimizacion(metrics: dict) -> float:
+    """Criterio explícito: mayor Sharpe en el ajuste, descartando lo que no opera."""
+    if not metrics or metrics.get("error") or int(metrics.get("trades", 0)) <= 0:
+        return float("-inf")
+    return float(metrics.get("sharpe", 0.0))
+
+
+def _run_source_periodo(source, asset, capital, parametros, inicio, fin):
+    """Ejecuta el código en el motor limitando el periodo (mismo contrato de salida)."""
+    cfg = ConfigEjecucion(
+        simbolo=str(asset).upper(),
+        capital=float(capital),
+        comision=COMMISSION_RATE,
+        parametros=dict(parametros or {}),
+        fecha_inicio=str(inicio),
+        fecha_fin=str(fin),
+    )
+    cfg.etiqueta = "optimizacion"
+    resultado = ejecutar_estrategia(fuente=source, config=cfg)
+    return _contrato_de_lab(resultado, asset, capital, cfg.parametros, "optimizacion")
+
+
+def _optimizar_parametros(source, asset, capital):
+    """Barrido acotado de parámetros. Devuelve `(propuesta, mensaje)`."""
+    info = strategy_parser.analizar_fuente(source, nombre="plantilla_inicial.py")
+    ajustables = [
+        parametro
+        for parametro in info.parametros
+        if plantilla_parametro_spec(parametro)["max"]
+        > plantilla_parametro_spec(parametro)["min"]
+    ]
+    if not ajustables:
+        return None, "La estrategia no declara parámetros ajustables con un rango válido."
+    optimizables = ajustables[:2]
+
+    from itertools import product
+
+    nombres = [parametro.nombre for parametro in optimizables]
+    candidatos = {
+        parametro.nombre: _candidatos_parametro(
+            parametro, plantilla_parametro_spec(parametro)
+        )
+        for parametro in optimizables
+    }
+    combinaciones = [
+        dict(zip(nombres, valores))
+        for valores in product(*(candidatos[nombre] for nombre in nombres))
+    ]
+    truncado = False
+    if len(combinaciones) > MAX_OPTIMIZACION_COMBINACIONES:
+        combinaciones = combinaciones[:MAX_OPTIMIZACION_COMBINACIONES]
+        truncado = True
+
+    ajuste_ini, ajuste_fin, val_ini, val_fin = _periodos_optimizacion(source)
+    actual = plantilla_parametros_activos()
+    try:
+        _, metricas_actual = _run_source_periodo(
+            source, asset, capital, actual, ajuste_ini, ajuste_fin
+        )
+    except Exception:  # noqa: BLE001
+        metricas_actual = None
+
+    evaluados = []
+    for combinacion in combinaciones:
+        try:
+            _, metricas = _run_source_periodo(
+                source, asset, capital, combinacion, ajuste_ini, ajuste_fin
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        evaluados.append((_criterio_optimizacion(metricas), combinacion, metricas))
+    if not evaluados:
+        return None, "No se pudo evaluar ninguna combinación de parámetros con el motor."
+    evaluados.sort(
+        key=lambda item: (item[0], float(item[2].get("sharpe", 0.0))), reverse=True
+    )
+    score, mejor, metricas_mejor = evaluados[0]
+
+    metricas_validacion = None
+    if score != float("-inf"):
+        try:
+            _, metricas_validacion = _run_source_periodo(
+                source, asset, capital, mejor, val_ini, val_fin
+            )
+        except Exception:  # noqa: BLE001
+            metricas_validacion = None
+
+    return (
+        {
+            "actual": actual,
+            "sugerido": mejor,
+            "optimizados": nombres,
+            "metricas_actual": metricas_actual,
+            "metricas_sugerido": metricas_mejor,
+            "metricas_validacion": metricas_validacion,
+            "criterio": (
+                "Mayor ratio de Sharpe en el periodo de ajuste, descartando las "
+                "combinaciones que no realizan ninguna operación."
+            ),
+            "periodos": {
+                "ajuste": (ajuste_ini, ajuste_fin),
+                "validacion": (val_ini, val_fin),
+            },
+            "evaluadas": len(evaluados),
+            "truncado": truncado,
+        },
+        "",
+    )
+
+
+def _aceptar_optimizacion() -> None:
+    """Vuelca los parámetros sugeridos en los controles, sin ejecutar ninguna prueba."""
+    propuesta = st.session_state.get(LAB_OPT_KEY) or {}
+    for nombre, valor in dict(propuesta.get("sugerido") or {}).items():
+        st.session_state[f"{PLANTILLA_PARAM_PREFIX}{nombre}"] = valor
+    st.session_state.pop(LAB_OPT_KEY, None)
+    st.session_state[LAB_OPT_ACEPTADA_KEY] = True
+
+
+def _descartar_optimizacion() -> None:
+    """Descarta la propuesta conservando los parámetros actuales."""
+    st.session_state.pop(LAB_OPT_KEY, None)
+
+
+def _ejecutar_optimizacion_plantilla(source, asset, initial_cap) -> None:
+    """Lanza el barrido para el borrador actual y guarda la propuesta en la sesión."""
+    source = str(source or "")
+    if not source.strip():
+        st.warning("El editor está vacío: no hay estrategia que optimizar.")
+        return
+    validacion = validate_strategy_source(source, "plantilla_inicial.py")
+    if not validacion["valid"]:
+        st.error("No se puede optimizar: " + " ".join(validacion["errors"]))
+        return
+    with st.spinner("Evaluando combinaciones de parámetros con el motor…"):
+        propuesta, mensaje = _optimizar_parametros(source, asset, initial_cap)
+    if not propuesta:
+        st.warning(mensaje or "La optimización no produjo ninguna propuesta.")
+        return
+    st.session_state[LAB_OPT_KEY] = propuesta
+    st.rerun()
+
+
+def _metricas_breve(met) -> dict:
+    """Resumen de métricas para la comparación actual/sugerido.
+
+    Incluye el capital final, que es el dato que el usuario debe poder comparar de un
+    vistazo; el resto son métricas secundarias.
+    """
+    met = met or {}
+    if met.get("error"):
+        return {
+            "Capital final $": None,
+            "Retorno %": None,
+            "Sharpe": None,
+            "Max DD %": None,
+            "Operaciones": None,
+        }
+    return {
+        "Capital final $": round(float(met.get("equity", 0.0)), 2),
+        "Retorno %": round(float(met.get("total_return", 0.0)), 2),
+        "Sharpe": round(float(met.get("sharpe", 0.0)), 2),
+        "Max DD %": round(float(met.get("max_drawdown", 0.0)), 2),
+        "Operaciones": int(met.get("trades", 0)),
+    }
+
+
+def _capital_final_texto(met) -> str:
+    """Capital final formateado para destacarlo, o «—» si no hay dato válido."""
+    met = met or {}
+    if met.get("error") or met.get("equity") is None:
+        return "—"
+    return f"${float(met.get("equity", 0.0)):,.2f}"
+
+
+def render_propuesta_optimizacion() -> None:
+    """Muestra la propuesta de parámetros con métricas, criterio y limitaciones."""
+    if st.session_state.pop(LAB_OPT_ACEPTADA_KEY, False):
+        st.success(
+            "Parámetros sugeridos aplicados a los controles. Pulsa «Simular» para crear "
+            "una nueva prueba comparativa."
+        )
+    propuesta = st.session_state.get(LAB_OPT_KEY)
+    if not propuesta:
+        return
+    with st.container(border=True):
+        st.markdown("**🪄 Propuesta de optimización de parámetros**")
+        st.caption(
+            "Barrido interno sobre el mismo motor. Las combinaciones evaluadas NO se "
+            "registran como pruebas ni añaden curvas a la gráfica."
+        )
+        filas = [
+            {
+                "Parámetro": nombre,
+                "Actual": propuesta["actual"].get(nombre),
+                "Sugerido": propuesta["sugerido"].get(nombre),
+            }
+            for nombre in propuesta.get("optimizados", [])
+        ]
+        if filas:
+            st.dataframe(pd.DataFrame(filas), hide_index=True, use_container_width=True)
+
+        ajuste = (propuesta.get("periodos") or {}).get("ajuste") or ("", "")
+        validacion = (propuesta.get("periodos") or {}).get("validacion") or ("", "")
+        st.markdown(
+            '<div class="sim-capital">Capital final sugerido (ajuste): '
+            f"{_capital_final_texto(propuesta.get('metricas_sugerido'))}</div>",
+            unsafe_allow_html=True,
+        )
+        comparativa = pd.DataFrame(
+            {
+                "Actual (ajuste)": _metricas_breve(propuesta.get("metricas_actual")),
+                "Sugerido (ajuste)": _metricas_breve(propuesta.get("metricas_sugerido")),
+            }
+        )
+        st.markdown("**Ajuste · base de la selección**")
+        st.caption(f"{ajuste[0]} → {ajuste[1]}")
+        st.dataframe(comparativa, use_container_width=True)
+        st.markdown("**Validación · solo como referencia**")
+        st.caption(f"{validacion[0]} → {validacion[1]}")
+        st.dataframe(
+            pd.DataFrame({"Sugerido (validación)": _metricas_breve(propuesta.get("metricas_validacion"))}),
+            use_container_width=True,
+        )
+        st.caption(f"Criterio: {propuesta.get('criterio')}")
+        st.caption(
+            f"Combinaciones evaluadas: {propuesta.get('evaluadas')}"
+            + (" · barrido recortado por límite." if propuesta.get("truncado") else ".")
+        )
+        st.caption(
+            "Limitaciones: la selección se apoya en datos históricos simulados y no "
+            "garantiza rentabilidad futura. La validación es una referencia fuera de la "
+            "muestra de ajuste, no una prueba definitiva; no se optimizan más de dos "
+            "parámetros a la vez."
+        )
+        aceptar_col, descartar_col = st.columns(2)
+        with aceptar_col:
+            st.button(
+                "Aceptar propuesta",
+                key="lab_opt_aceptar",
+                type="primary",
+                use_container_width=True,
+                on_click=_aceptar_optimizacion,
+            )
+        with descartar_col:
+            st.button(
+                "Descartar",
+                key="lab_opt_descartar",
+                use_container_width=True,
+                on_click=_descartar_optimizacion,
+            )
+
+
+def render_plantilla_variables(source: str) -> tuple[dict, bool]:
     """Barra plegable «Variables de la estrategia» del borrador inicial.
 
     Muestra un control por cada parámetro que el parser detecta en el código (no inventa
     variables): los de la plantilla usan su rango explícito y el resto el que sugiere el
-    parser. Devuelve los valores vigentes para alimentar `PARAMETROS_ACTIVOS`, de modo
-    que el siguiente `Ejecutar Backtest` los use sin tocar el motor ni archivos guardados.
+    parser. Devuelve `(valores_vigentes, simular_pulsado)` para alimentar
+    `PARAMETROS_ACTIVOS` y detectar la acción «Simular».
+
+    El expander usa una clave estable y una etiqueta fija: mover un control, restablecer
+    o cambiar los parámetros ya no cambia su identidad, de modo que Streamlit conserva su
+    estado abierto/cerrado tal como lo dejó el usuario.
     """
     info = strategy_parser.analizar_fuente(source, nombre="plantilla_inicial.py")
     parametros = list(info.parametros)
     valores: dict = {}
-    resumen = " · ".join(
-        f"{p.nombre}="
-        f"{st.session_state.get(f'{PLANTILLA_PARAM_PREFIX}{p.nombre}', plantilla_parametro_spec(p)['default'])}"
-        for p in parametros
-    )
-    etiqueta = "⚙️ Variables de la estrategia"
-    if resumen:
-        etiqueta = f"{etiqueta}  ·  {resumen}"
-    with st.expander(etiqueta, expanded=False):
+    simular_clicked = False
+    with st.expander(
+        "⚙️ Variables de la estrategia",
+        expanded=False,
+        key="plantilla_variables_panel",
+    ):
         if not parametros:
             st.caption(
                 "El código del borrador no declara parámetros ajustables con valores por "
@@ -5194,7 +5940,7 @@ def render_plantilla_variables(source: str) -> dict:
                     max_value=spec["max"],
                     step=spec["step"],
                     key=clave,
-                    help=help,
+                    help=ayuda,
                 )
             else:
                 elegido = st.number_input(
@@ -5207,13 +5953,29 @@ def render_plantilla_variables(source: str) -> dict:
             valores[parametro.nombre] = (
                 int(round(float(elegido))) if parametro.es_entero else float(elegido)
             )
-        st.button(
-            "Restablecer valores",
-            key="btn_reset_plantilla_params",
-            on_click=_reset_plantilla_parametros,
-            help="Vuelve a los valores por defecto de la plantilla (no modifica archivos).",
-        )
-    return valores or plantilla_parametros_activos()
+        if valores:
+            st.caption("Valores actuales · " + _formato_parametros(valores))
+        restablecer_col, simular_col = st.columns(2)
+        with restablecer_col:
+            st.button(
+                "Restablecer",
+                key="btn_reset_plantilla_params",
+                on_click=_reset_plantilla_parametros,
+                help="Vuelve a los valores por defecto (no borra pruebas ni resultados).",
+                use_container_width=True,
+            )
+        with simular_col:
+            simular_clicked = st.button(
+                "Simular",
+                key="btn_simular_plantilla",
+                type="primary",
+                use_container_width=True,
+                help=(
+                    "Ejecuta una nueva prueba con los parámetros actuales y añade una "
+                    "curva a la gráfica comparativa."
+                ),
+            )
+    return (valores or plantilla_parametros_activos()), simular_clicked
 
 
 def render_plantilla_inicial_editor(asset, initial_cap) -> None:
@@ -5237,19 +5999,13 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
         st.markdown(
             '<div class="editor-header"><span class="dot">●</span> '
             '<span title="Borrador temporal en memoria: no se escribe en disco hasta '
-            'pulsar «Guardar Como».">⭐ Plantilla inicial del Laboratorio</span>'
+            'pulsar «Guardar como…».">⭐ Plantilla inicial del Laboratorio</span>'
             '<span class="editor-provenance">Borrador temporal · sin guardar</span></div>',
             unsafe_allow_html=True,
         )
-        st.markdown(
-            '<div class="lab-info-card">'
-            '<div class="lab-info-title">¿Qué hace esta plantilla?</div>'
-            '<div class="lab-info-body">Es una estrategia sencilla de cruce de promedios '
-            "móviles (SMA). Calcula un promedio rápido y otro lento del precio de cierre, "
-            "y genera señales según la relación entre ambos. Puedes cambiar sus parámetros, "
-            "modificar el código o pegar una estrategia creada con ayuda de IA.</div></div>",
-            unsafe_allow_html=True,
-        )
+        with st.popover("ℹ️ ¿Qué hace esta plantilla?"):
+            st.markdown(PLANTILLA_DESCRIPCION)
+
         source = str(
             st.text_area(
                 "Código de la plantilla inicial",
@@ -5261,28 +6017,13 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
         )
         st.session_state[PLANTILLA_CODE_KEY] = source
 
-        new_filename = st.text_input(
-            "Nombre del archivo nuevo (.py)",
-            value=st.session_state.get("new_filename_plantilla", "mi_estrategia.py"),
-            key="new_filename_plantilla",
-            help="Se usará al pulsar «Guardar Como…».",
-        )
-        target_name = (
-            new_filename if new_filename.endswith(".py") else f"{new_filename}.py"
-        )
-        validacion_guardar = validate_strategy_source(
-            source,
-            target_name if is_valid_strategy_filename(target_name) else "estrategia.py",
-        )
-        save_col, run_col, ai_col = st.columns([1, 1, 1])
+        validacion_guardar = validate_strategy_source(source, "estrategia.py")
+        save_col, run_col, ai_col = st.columns([1, 1.1, 1.5], gap="small")
         with save_col:
             save_as_clicked = st.button(
-                "Guardar Como…",
+                "💾 Guardar como…",
                 key="btn_save_as_plantilla",
-                disabled=not (
-                    validacion_guardar["valid"]
-                    and is_valid_strategy_filename(target_name)
-                ),
+                disabled=not validacion_guardar["valid"],
                 use_container_width=True,
             )
         with run_col:
@@ -5294,25 +6035,45 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
             )
         with ai_col:
             ai_clicked = st.button(
-                "🪄 Optimizar con IA",
+                "✨ Optimizar variables con IA",
                 key="btn_ai_plantilla",
                 use_container_width=True,
+                help=(
+                    "Evalúa combinaciones de los parámetros de la estrategia y propone la "
+                    "mejor según el Sharpe en el periodo de ajuste. No añade curvas: tras "
+                    "aceptar, pulsa «Simular» para verla."
+                ),
             )
         if not validacion_guardar["valid"]:
-            st.caption("Guardar Como: " + " ".join(validacion_guardar["errors"]))
+            st.caption(
+                "Guardar como: no se puede guardar todavía — "
+                + " ".join(validacion_guardar["errors"])
+            )
 
-        valores_variables = render_plantilla_variables(source)
+        variables_col, historial_col = st.columns([1, 1], gap="medium")
+        with variables_col:
+            valores_variables, simular_clicked = render_plantilla_variables(source)
+        with historial_col:
+            render_simulaciones_panel("")
+
         PARAMETROS_ACTIVOS.clear()
         PARAMETROS_ACTIVOS.update(valores_variables)
 
         if run_clicked:
             _ejecutar_plantilla(asset, initial_cap)
+        if simular_clicked:
+            _simular_plantilla(source, asset, initial_cap)
         if ai_clicked:
-            st.session_state["codigo_actual"] = source
-            st.session_state["codigo_actual_script"] = ""
-            modal_ia_optimizar()
+            _ejecutar_optimizacion_plantilla(source, asset, initial_cap)
         if save_as_clicked:
-            _guardar_plantilla_como(source, target_name)
+            st.session_state.pop(LAB_SAVE_AS_OVERWRITE_KEY, None)
+            st.session_state[LAB_SAVE_AS_OPEN_KEY] = True
+            st.rerun()
+
+        if st.session_state.get(LAB_SAVE_AS_OPEN_KEY):
+            _plantilla_save_as_dialog(source)
+
+        render_propuesta_optimizacion()
 
 
 def render_principal_editor(script: str, asset, initial_cap) -> None:
@@ -6003,9 +6764,10 @@ def build_equity_figure(
             df_res.index, df_res["Equity"], f"Principal ⭐ ({script_name})",
             PRINCIPAL_COLOR, 2.2, None,
         )
-    for pos, item in enumerate(comparatives[:MAX_COMPARATIVES]):
-        color = COMPARE_COLORS[pos % len(COMPARE_COLORS)]
-        add_curve(None, item["equity"], f"Comparativa ({item['name']})", color, 1.8, "solid")
+    for pos, item in enumerate(comparatives):
+        color = item.get("color") or COMPARE_COLORS[pos % len(COMPARE_COLORS)]
+        legend = item.get("legend") or f"Comparativa ({item['name']})"
+        add_curve(None, item["equity"], legend, color, 1.8, "solid")
     if draft_equity is not None:
         add_curve(
             None, draft_equity, f"Borrador IA ({(draft_metrics or {}).get('model', 'borrador')})",
@@ -6315,6 +7077,15 @@ def render_laboratorio_inicial() -> None:
     )
 
     hay_resultado = not metrics.get("standby") and not metrics.get("error")
+    sim_curvas = simulaciones_curvas("")
+    hay_grafica = hay_resultado or bool(sim_curvas)
+
+    if hay_resultado and plantilla_resultado_desactualizado(asset, initial_cap):
+        st.info(
+            "Los resultados mostrados corresponden a una ejecución anterior: cambiaste el "
+            "activo, el capital, un parámetro o el código. Pulsa «▶ Ejecutar Backtest» "
+            "para actualizarlos. Las pruebas registradas se conservan."
+        )
 
     if hay_resultado:
         equity_value = float(metrics["equity"])
@@ -6369,7 +7140,7 @@ def render_laboratorio_inicial() -> None:
             '<div class="panel-title">📈 Resultados del backtest</div>',
             unsafe_allow_html=True,
         )
-        if hay_resultado:
+        if hay_grafica:
             chart_view = st.radio(
                 "Escala de la curva",
                 EQUITY_VIEWS,
@@ -6383,9 +7154,10 @@ def render_laboratorio_inicial() -> None:
                 df_res,
                 asset,
                 "Plantilla inicial",
-                show_equity,
-                show_benchmark,
-                show_drawdown,
+                show_equity and hay_resultado,
+                show_benchmark and hay_resultado,
+                show_drawdown and hay_resultado,
+                comparatives=sim_curvas,
                 view=chart_view,
             )
             st.plotly_chart(
@@ -6393,6 +7165,14 @@ def render_laboratorio_inicial() -> None:
                 use_container_width=True,
                 config={"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
             )
+            if sim_curvas:
+                leyenda = " · ".join(
+                    f"{curva['name']}" for curva in sim_curvas
+                )
+                st.caption(
+                    "Curvas de las pruebas registradas con «Simular»: " + leyenda
+                    + (" · ⭐ backtest de la plantilla" if hay_resultado else "")
+                )
         else:
             st.markdown(
                 '<div class="lab-empty-chart">'
