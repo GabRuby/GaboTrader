@@ -2,6 +2,7 @@ import ast
 import base64
 import hashlib
 import importlib.util
+import inspect
 import os
 import re
 import sys
@@ -1171,9 +1172,27 @@ MAX_OPTIMIZACION_COMBINACIONES = 24
 # el propio parser, así que el mecanismo queda preparado para ampliarse sin tocar el
 # contrato del motor (que sigue recibiendo los overrides por `ConfigEjecucion`).
 PLANTILLA_PARAMETROS_SPEC = {
-    "fast_ma": {"label": "Fast SMA", "min": 1, "max": 50, "step": 1, "default": 10},
-    "slow_ma": {"label": "Slow SMA", "min": 20, "max": 200, "step": 1, "default": 50},
+    "fast_ma": {"label": "Fast SMA", "min": 2, "max": 100, "step": 1, "default": 10},
+    "slow_ma": {"label": "Slow SMA", "min": 3, "max": 200, "step": 1, "default": 50},
 }
+
+# Fase B · controles numéricos sincronizados y validación de coherencia.
+# Cada control lleva un slider (clave canónica) y un campo numérico espejo
+# (`{clave}_num`); el registro «last» (`last_{clave}`) permite saber, al inicio de
+# cada run, cuál de los dos cambió. `PARAMETROS_VALIDOS_KEY` guarda, por ámbito, el
+# último conjunto de valores que cumplió las reglas, para que el motor nunca reciba
+# una configuración inválida aunque los controles sí la muestren.
+PARAMETROS_VALIDOS_KEY = "parametros_validos"
+RESULT_STALE_KEY = "backtest_result_stale"
+COMPARE_STALE_KEY = "compare_results_stale"
+
+# Reglas de coherencia entre parámetros (hoy solo fast_ma < slow_ma). Se aplican en
+# los tres ámbitos (plantilla, Principal y comparativa) ANTES de tocar el motor. La
+# plantilla del mensaje usa el nombre de código; cada ámbito lo sustituye por su
+# etiqueta legible cuando la conoce.
+REGLAS_VALIDACION_PARAMETROS = (
+    ("fast_ma", "slow_ma", "«{fast_ma}» debe ser menor que «{slow_ma}»."),
+)
 
 
 def plantilla_parametro_spec(parametro) -> dict:
@@ -1203,13 +1222,181 @@ def plantilla_parametro_spec(parametro) -> dict:
     }
 
 
+def _clave_espejo(clave: str) -> str:
+    """Clave del campo numérico espejo de un control."""
+    return f"{clave}_num"
+
+
+def _valor_ajustado(valor, spec, es_entero, con_slider=True):
+    """Clampa `valor` al rango del control y lo alinea a la rejilla del paso.
+
+    Con slider el valor vive en la rejilla `min + n·paso` (si no, Streamlit
+    redondearía en el primer clic y el espejo y el slider divergirían). Sin slider
+    (rango degenerado o valor declarado fuera de la rejilla) solo se clampa, para no
+    pisar el valor que el propio código declara.
+    """
+    minimo, maximo = float(spec["min"]), float(spec["max"])
+    paso = float(spec["step"])
+    ajustado = min(max(float(valor), minimo), maximo)
+    if con_slider and paso > 0:
+        posiciones = round((ajustado - minimo) / paso)
+        ajustado = min(minimo + posiciones * paso, maximo)
+        ajustado = max(ajustado, minimo)
+    return int(round(ajustado)) if es_entero else float(ajustado)
+
+
+def _sanear_parametros_motor(parametros: dict) -> dict:
+    """Última defensa antes de inyectar parámetros en `run_strategy`.
+
+    Los parámetros enteros (fast_ma, slow_ma, y cualquier otro que el parser marque
+    como entero) llegan a veces como float (`10.0`) desde los widgets o la caché de
+    sesión. Un float entero exacto se convierte a `int` nativo; un decimal real o un
+    valor fuera de rango se RECHAZA con error visible (nunca se corrige en silencio),
+    porque `DataFrame.rolling(window=...)` exige un entero y un valor inventado
+    cambiaría la estrategia sin que el usuario lo vea.
+    """
+    saneados: dict = {}
+    for nombre, valor in dict(parametros or {}).items():
+        if nombre in PLANTILLA_PARAMETROS_SPEC:
+            rango = PLANTILLA_PARAMETROS_SPEC[nombre]
+            minimo, maximo = int(rango["min"]), int(rango["max"])
+            if isinstance(valor, bool):
+                raise ValueError(
+                    f"Parámetro `{nombre}` inválido: {valor!r} no es un número."
+                )
+            try:
+                numerico = float(valor)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Parámetro `{nombre}` inválido: {valor!r} no es un número."
+                ) from None
+            if not numerico.is_integer():
+                raise ValueError(
+                    f"Parámetro `{nombre}` inválido: {valor!r} debe ser un entero."
+                )
+            entero = int(numerico)
+            if not (minimo <= entero <= maximo):
+                raise ValueError(
+                    f"Parámetro `{nombre}` fuera de rango: {entero} "
+                    f"(permitido {minimo}–{maximo})."
+                )
+            saneados[nombre] = entero
+        else:
+            saneados[nombre] = valor
+    if (
+        "fast_ma" in saneados
+        and "slow_ma" in saneados
+        and saneados["fast_ma"] >= saneados["slow_ma"]
+    ):
+        raise ValueError(
+            "Coherencia de parámetros inválida: Fast SMA debe ser menor que Slow SMA."
+        )
+    return saneados
+
+
+def sincronizar_control(
+    clave: str, spec: dict, es_entero: bool, con_slider: bool = True, inicial=None
+):
+    """Sincroniza el slider y su espejo numérico ANTES de montar los widgets.
+
+    Streamlit actualiza los widgets entre runs, así que al empezar el run el estado
+    de sesión ya refleja la última interacción: si el slider cambió respecto al
+    registro «last» manda él; si cambió el espejo manda el espejo. El valor elegido
+    se ajusta al rango y se escribe en ambas claves (solo si difiere) para que el
+    slider y el campo numérico no puedan discrepar. `inicial` es el valor con el que
+    arranca el control la primera vez (por defecto, el del spec).
+    """
+    if inicial is None:
+        inicial = spec["default"]
+    inicial = _valor_ajustado(inicial, spec, es_entero, con_slider)
+    anterior = st.session_state.get(f"last_{clave}")
+    base = st.session_state.get(clave, inicial)
+    if anterior is not None:
+        try:
+            espejo = (
+                st.session_state.get(_clave_espejo(clave)) if con_slider else None
+            )
+            if float(base) == float(anterior) and espejo is not None:
+                if float(espejo) != float(anterior):
+                    base = espejo
+        except (TypeError, ValueError):
+            pass
+    valor = _valor_ajustado(base, spec, es_entero, con_slider)
+    if st.session_state.get(clave) != valor:
+        st.session_state[clave] = valor
+    if con_slider and st.session_state.get(_clave_espejo(clave)) != valor:
+        st.session_state[_clave_espejo(clave)] = valor
+    st.session_state[f"last_{clave}"] = valor
+    return valor
+
+
+def _incidentes_parametros(valores: dict, etiquetas: dict | None = None) -> dict:
+    """Mapa `clave -> [mensajes]` con las reglas que cada parámetro incumple."""
+    etiquetas = etiquetas or {}
+    incidentes: dict = {}
+    for izquierda, derecha, plantilla in REGLAS_VALIDACION_PARAMETROS:
+        if izquierda not in valores or derecha not in valores:
+            continue
+        try:
+            cumple = float(valores[izquierda]) < float(valores[derecha])
+        except (TypeError, ValueError):
+            cumple = False
+        if cumple:
+            continue
+        mensaje = plantilla.format(
+            **{
+                izquierda: etiquetas.get(izquierda, izquierda),
+                derecha: etiquetas.get(derecha, derecha),
+            }
+        )
+        incidentes.setdefault(izquierda, []).append(mensaje)
+        incidentes.setdefault(derecha, []).append(mensaje)
+    return incidentes
+
+
+def validar_parametros(valores: dict, etiquetas: dict | None = None) -> list[str]:
+    """Mensajes únicos de las reglas de coherencia que estos valores incumplen."""
+    mensajes: list[str] = []
+    for lista in _incidentes_parametros(valores, etiquetas).values():
+        for mensaje in lista:
+            if mensaje not in mensajes:
+                mensajes.append(mensaje)
+    return mensajes
+
+
+def valores_seguros(scope: str, valores: dict, declarados: dict) -> dict:
+    """Valores con los que SÍ puede trabajar el motor para un ámbito.
+
+    Si los valores actuales cumplen las reglas se guardan como últimos válidos del
+    ámbito y se devuelven. Si no, se devuelve el último válido guardado; y si no lo
+    hay, los declarados por el código (solo si también cumplen); y si tampoco, nada:
+    el motor usará los defaults del propio código.
+    """
+    valores = dict(valores or {})
+    declarados = dict(declarados or {})
+    registro = dict(st.session_state.get(PARAMETROS_VALIDOS_KEY) or {})
+    # `validar_parametros` devuelve los MENSAJES de las reglas incumplidas: lista
+    # vacía == valores coherentes. Con incidentes se conserva el último válido.
+    if validar_parametros(valores):
+        ultimo = registro.get(scope)
+        if isinstance(ultimo, dict) and not validar_parametros(ultimo):
+            return dict(ultimo)
+        if not validar_parametros(declarados):
+            return dict(declarados)
+        return {}
+    registro[scope] = dict(valores)
+    st.session_state[PARAMETROS_VALIDOS_KEY] = registro
+    return dict(valores)
+
+
 def plantilla_parametros_activos() -> dict:
     """Valores vigentes de los parámetros del borrador, leídos del estado de la sesión.
 
     Se resuelve ANTES de calcular métricas (igual que `strategy_parameter_state` para la
     Principal) para que `_sello_parametros` invalide el resultado cacheado en cuanto se
-    mueve un control. En el primer run, sin widgets todavía, cae en los valores por
-    defecto de la plantilla (fast_ma=10, slow_ma=50).
+    mueve un control. Sincroniza cada control (slider + espejo) y devuelve valores que
+    cumplen las reglas de coherencia: el motor nunca recibe fast_ma >= slow_ma aunque
+    los controles lo muestren; en ese caso se conserva el último valor válido.
     """
     source = str(
         st.session_state.get(PLANTILLA_EDITOR_KEY)
@@ -1218,19 +1405,22 @@ def plantilla_parametros_activos() -> dict:
     )
     info = strategy_parser.analizar_fuente(source, nombre="plantilla_inicial.py")
     valores: dict = {}
+    declarados: dict = {}
     for parametro in info.parametros:
         spec = plantilla_parametro_spec(parametro)
         clave = f"{PLANTILLA_PARAM_PREFIX}{parametro.nombre}"
+        sincronizar_control(clave, spec, parametro.es_entero)
         valor = st.session_state.get(clave, spec["default"])
         valores[parametro.nombre] = (
             int(round(float(valor))) if parametro.es_entero else float(valor)
         )
+        declarados[parametro.nombre] = spec["default"]
     if not valores:
-        valores = {
+        declarados = {
             nombre: spec["default"]
             for nombre, spec in PLANTILLA_PARAMETROS_SPEC.items()
         }
-    return valores
+    return valores_seguros("plantilla", valores, declarados)
 
 
 def read_script_source(rel_path: str) -> str:
@@ -2537,7 +2727,7 @@ PRINCIPAL_KEY = "principal_script"
 COMPARE_KEY = "compare_selection"
 COMPARE_CACHE_KEY = "compare_cache"
 CHART_VIEW_KEY = "chart_view"
-MAX_COMPARATIVES = 1
+MAX_COMPARATIVES = 2
 # Comisión por ejecución (0.05 % del nocional). Ahora la aplica el motor de qc_lab
 # en el dialecto vectorial; en el dialecto Lean manda el modelo de broker que
 # declare la propia estrategia. Se conserva aquí como valor por defecto explicito.
@@ -2944,7 +3134,9 @@ def _config_lab(ticker, capital, parametros=None):
         simbolo=str(ticker).upper(),
         capital=float(capital),
         comision=COMMISSION_RATE,
-        parametros=dict(PARAMETROS_ACTIVOS if parametros is None else parametros),
+        parametros=_sanear_parametros_motor(
+            PARAMETROS_ACTIVOS if parametros is None else parametros
+        ),
     )
 
 
@@ -3108,8 +3300,33 @@ def run_comparative_backtest(script, ticker, capital, parametros=None):
     return df, metrics
 
 
+def _ejecutar_comparativa(script, ticker, capital, parametros):
+    """Lanza `run_comparative_backtest` con los parámetros reales de la comparativa.
+
+    Los parámetros son obligatorios para el motor: sin ellos `_config_lab` caería en
+    `PARAMETROS_ACTIVOS`, que es lo de la Estrategia Principal. Antes de llamar se lee
+    la firma de la rutina y solo se omiten los parámetros cuando esa rutina no los
+    admite, de modo que el valor llega siempre que la firma lo permita.
+    """
+    try:
+        firma = inspect.signature(run_comparative_backtest)
+    except (TypeError, ValueError):
+        firma = None
+    if firma is not None:
+        try:
+            firma.bind(script, ticker, capital, parametros)
+        except TypeError:
+            return run_comparative_backtest(script, ticker, capital)
+    return run_comparative_backtest(script, ticker, capital, parametros)
+
+
 def get_comparative_results(scripts, ticker, capital, force=False) -> dict:
-    """Results de las comparativas seleccionadas, cacheados por script + parámetros."""
+    """Results de las comparativas seleccionadas, cacheados por script + parámetros.
+
+    Cambiar SOLO los parámetros de una comparativa no re-ejecuta: se conserva su
+    resultado anterior y se registra en `COMPARE_STALE_KEY` para que la interfaz lo
+    avise; «Ejecutar Backtest» (force=True) refresca todas.
+    """
     pending_script = st.session_state.get(COMPARE_PENDING_KEY)
     if pending_script in scripts and not force:
         return {}
@@ -3119,6 +3336,7 @@ def get_comparative_results(scripts, ticker, capital, force=False) -> dict:
         if s in ALL_STRATEGIES or external_strategy_record(s) is not None
     ]
     out = {}
+    obsoletas: set = set()
     for script in wanted:
         parametros = dict(
             (st.session_state.get(COMPARE_PARAMETERS_KEY) or {}).get(script) or {}
@@ -3130,14 +3348,30 @@ def get_comparative_results(scripts, ticker, capital, force=False) -> dict:
             _sello_codigo_estrategia(script),
         )
         cached = cache.get(script)
-        if not cached or cached.get("params") != stamp:
-            df, metrics = run_comparative_backtest(
-                script, ticker, capital, parametros
-            )
-            cached = {"params": stamp, "df": df, "metrics": metrics}
-            cache[script] = cached
+        if cached is not None and cached.get("params") == stamp:
+            out[script] = cached
+            continue
+        if (
+            cached is not None
+            and not force
+            and _sello_solo_cambio_parametros(cached.get("params"), stamp, 1)
+        ):
+            # Solo cambiaron los parámetros de ESTA comparativa: se conserva su
+            # resultado y se marca como anterior a la configuración vigente.
+            obsoletas.add(script)
+            out[script] = cached
+            continue
+        df, metrics = _ejecutar_comparativa(
+            script, ticker, capital, parametros
+        )
+        cached = {"params": stamp, "df": df, "metrics": metrics}
+        cache[script] = cached
         out[script] = cached
     st.session_state[COMPARE_CACHE_KEY] = cache
+    if obsoletas:
+        st.session_state[COMPARE_STALE_KEY] = obsoletas
+    else:
+        st.session_state.pop(COMPARE_STALE_KEY, None)
     if force and pending_script in scripts:
         st.session_state.pop(COMPARE_PENDING_KEY, None)
     return out
@@ -3228,6 +3462,22 @@ def plantilla_resultado_desactualizado(ticker, capital) -> bool:
     return st.session_state.get(PLANTILLA_PARAMS_KEY) != _sello_plantilla(ticker, capital)
 
 
+def _sello_solo_cambio_parametros(guardado, actual, indice: int) -> bool:
+    """¿Ambas huellas de caché solo difieren en el sello de parámetros?
+
+    `indice` es la posición de `_sello_parametros()` en la tupla de cada ámbito
+    (2 para la Principal, 1 para una comparativa). Si cambió el activo, el capital,
+    el código o la estrategia, la respuesta es `False`: eso sí exige re-ejecutar.
+    """
+    if not isinstance(guardado, tuple) or not isinstance(actual, tuple):
+        return False
+    if len(guardado) != len(actual) or indice >= len(guardado):
+        return False
+    return tuple(v for i, v in enumerate(guardado) if i != indice) == tuple(
+        v for i, v in enumerate(actual) if i != indice
+    )
+
+
 def get_backtest_result(ticker, capital, force=False):
     """Resultado del backtest de la Estrategia Principal, cacheado por parámetros.
 
@@ -3239,6 +3489,10 @@ def get_backtest_result(ticker, capital, force=False):
     Sin Estrategia Principal no se ejecuta NADA: ni la anterior, ni el primer archivo
     del proyecto, ni uno inventado. Se devuelve el estado de espera y el laboratorio
     espera a que el usuario abra una estrategia.
+
+    Cambiar SOLO un parámetro no re-ejecuta: se conserva el resultado anterior y se
+    marca con `RESULT_STALE_KEY` para que la interfaz avise; «Ejecutar Backtest»
+    (force=True) sí lo refresca.
     """
     script = st.session_state.get(PRINCIPAL_KEY)
     if not script:
@@ -3261,9 +3515,17 @@ def get_backtest_result(ticker, capital, force=False):
         _sello_codigo_estrategia(script),
     )
     cached = st.session_state.get(RESULT_KEY)
+    guardado = st.session_state.get(PARAMS_KEY)
 
-    if not force and cached is not None and st.session_state.get(PARAMS_KEY) == params:
-        return cached["df"], cached["metrics"]
+    if cached is not None and not force:
+        if guardado == params:
+            st.session_state.pop(RESULT_STALE_KEY, None)
+            return cached["df"], cached["metrics"]
+        if _sello_solo_cambio_parametros(guardado, params, 2):
+            # Solo cambió un parámetro: no se re-ejecuta, pero el resultado deja de
+            # corresponder a la configuración vigente y la interfaz debe avisarlo.
+            st.session_state[RESULT_STALE_KEY] = True
+            return cached["df"], cached["metrics"]
 
     try:
         df, metrics = run_strategy_backtest(script, ticker, capital)
@@ -3276,6 +3538,7 @@ def get_backtest_result(ticker, capital, force=False):
 
     st.session_state[RESULT_KEY] = {"df": df, "metrics": metrics}
     st.session_state[PARAMS_KEY] = params
+    st.session_state.pop(RESULT_STALE_KEY, None)
     return df, metrics
 
 
@@ -5159,7 +5422,7 @@ def render_comparison_editor(script: str) -> None:
             unsafe_allow_html=True,
         )
         st.markdown("**Parámetros de esta estrategia**")
-        render_strategy_parameters(script, source, "comparison")
+        _, errores_cmp = render_strategy_parameters(script, source, "comparison")
         if st.session_state.get("editor_undo_error"):
             st.error(st.session_state.pop("editor_undo_error"))
 
@@ -5631,11 +5894,9 @@ def _candidatos_parametro(parametro, spec) -> list:
     valores: list = []
     for v in crudos:
         v = max(minimo, min(maximo, v))
-        if parametro.es_entero:
-            # Entero nativo, no `float(round(...))`: el motor inyecta el valor tal cual
-            # en la firma de `run_strategy` y `DataFrame.rolling(window=...)` exige un
-            # `int` (con `1.0` pandas lanza «window must be an integer»).
-            v = int(round(v))
+        if parametro.es_entero or parametro.nombre in ("fast_ma", "slow_ma"):
+            # Entero nativo: asegurar int
+            v = int(round(float(v)))
         else:
             pasos = round((v - minimo) / paso)
             v = max(minimo, min(maximo, minimo + pasos * paso))
@@ -5661,7 +5922,7 @@ def _run_source_periodo(source, asset, capital, parametros, inicio, fin):
         simbolo=str(asset).upper(),
         capital=float(capital),
         comision=COMMISSION_RATE,
-        parametros=dict(parametros or {}),
+        parametros=_sanear_parametros_motor(parametros or {}),
         fecha_inicio=str(inicio),
         fecha_fin=str(fin),
     )
@@ -5696,6 +5957,11 @@ def _optimizar_parametros(source, asset, capital):
         dict(zip(nombres, valores))
         for valores in product(*(candidatos[nombre] for nombre in nombres))
     ]
+    # Fase E (pendiente): filtrar aquí las combinaciones que incumplan
+    # REGLAS_VALIDACION_PARAMETROS (p. ej. fast_ma >= slow_ma). Hoy no se filtran y
+    # esas combinaciones se descartan más abajo al fallar el motor, lo que diluye el
+    # intento sin ensuciar resultados; al filtrarlas el cupo MAX_OPTIMIZACIONES
+    # se dedicará solo a combinaciones evaluables.
     truncado = False
     if len(combinaciones) > MAX_OPTIMIZACION_COMBINACIONES:
         combinaciones = combinaciones[:MAX_OPTIMIZACION_COMBINACIONES]
@@ -5901,21 +6167,19 @@ def render_propuesta_optimizacion() -> None:
             )
 
 
-def render_plantilla_variables(source: str) -> tuple[dict, bool]:
+def render_plantilla_variables(source: str) -> tuple[dict, bool, list[str]]:
     """Barra plegable «Variables de la estrategia» del borrador inicial.
 
     Muestra un control por cada parámetro que el parser detecta en el código (no inventa
-    variables): los de la plantilla usan su rango explícito y el resto el que sugiere el
-    parser. Devuelve `(valores_vigentes, simular_pulsado)` para alimentar
-    `PARAMETROS_ACTIVOS` y detectar la acción «Simular».
-
-    El expander usa una clave estable y una etiqueta fija: mover un control, restablecer
-    o cambiar los parámetros ya no cambia su identidad, de modo que Streamlit conserva su
-    estado abierto/cerrado tal como lo dejó el usuario.
+    variables): usa slider + espejo numérico, sincronizados antes de instanciar.
+    Devuelve `(valores_seguros, simular_pulsado, errores)` para alimentar
+    `PARAMETROS_ACTIVOS` y detectar la acción «Simular» y bloquear botones si hay
+    incoherencias.
     """
     info = strategy_parser.analizar_fuente(source, nombre="plantilla_inicial.py")
     parametros = list(info.parametros)
     valores: dict = {}
+    errores: list[str] = []
     simular_clicked = False
     with st.expander(
         "⚙️ Variables de la estrategia",
@@ -5930,31 +6194,101 @@ def render_plantilla_variables(source: str) -> tuple[dict, bool]:
         for parametro in parametros:
             spec = plantilla_parametro_spec(parametro)
             clave = f"{PLANTILLA_PARAM_PREFIX}{parametro.nombre}"
-            if clave not in st.session_state:
-                st.session_state[clave] = spec["default"]
-            ayuda = f"Rango {spec['min']} – {spec['max']} · valor por defecto {spec['default']}."
-            if spec["max"] > spec["min"]:
-                elegido = st.slider(
-                    spec["label"],
-                    min_value=spec["min"],
-                    max_value=spec["max"],
-                    step=spec["step"],
-                    key=clave,
+            minimo, maximo, paso = spec["min"], spec["max"], spec["step"]
+            if parametro.es_entero:
+                # Enteros NATIVOS en los widgets: con float (2.0/100.0/1.0) Streamlit
+                # almacena y devuelve `10.0`, y ese float llega a `rolling(window=...)`.
+                paso = max(1, int(round(paso)))
+                minimo = int(round(minimo))
+                maximo = int(max(round(maximo), spec["default"] + paso))
+                default_cur = int(round(spec["default"]))
+            else:
+                maximo = float(round(maximo, 6))
+                minimo = float(round(minimo, 6))
+                paso = float(round(paso, 6)) if paso != 0 else 0.01
+                default_cur = float(spec["default"])
+            spec_cur = {
+                "label": spec["label"],
+                "min": minimo,
+                "max": maximo,
+                "step": paso,
+                "default": default_cur,
+            }
+            puede_sl = maximo > minimo and _cae_en_rejilla(default_cur, minimo, paso)
+            if puede_sl and paso <= 0:
+                puede_sl = False
+            sincronizar_control(
+                clave, spec_cur, parametro.es_entero, con_slider=puede_sl, inicial=default_cur
+            )
+            elegido = st.session_state.get(clave, default_cur)
+            ayuda = (
+                f"Rango {spec_cur['min']} – {spec_cur['max']} · valor por defecto "
+                f"{spec_cur['default']} · clave: {clave}"
+            )
+            row = st.columns([4, 1])
+            with row[0]:
+                if puede_sl:
+                    elegido = st.slider(
+                        spec_cur["label"],
+                        min_value=minimo,
+                        max_value=maximo,
+                        value=elegido,
+                        step=paso,
+                        key=clave,
+                        help=ayuda,
+                    )
+                else:
+                    elegido = st.number_input(
+                        spec_cur["label"],
+                        min_value=minimo,
+                        max_value=maximo,
+                        value=elegido,
+                        step=paso,
+                        key=clave,
+                        help=ayuda,
+                    )
+            with row[1]:
+                st.number_input(
+                    parametro.nombre,
+                    min_value=minimo,
+                    max_value=maximo,
+                    value=elegido,
+                    step=paso,
+                    key=_clave_espejo(clave),
+                    label_visibility="collapsed",
                     help=ayuda,
                 )
-            else:
-                elegido = st.number_input(
-                    spec["label"],
-                    min_value=spec["min"],
-                    max_value=spec["max"],
-                    step=spec["step"],
-                    key=clave,
-                )
+            # Tras instanciar SOLO se lee: el valor devuelto por el widget ya está
+            # clamped por el propio Streamlit y `sincronizar_control` corrigió antes
+            # de montar. Escribir en claves de widget ya instanciado rompería el run.
+            elegido = _valor_ajustado(
+                elegido, spec_cur, parametro.es_entero, con_slider=puede_sl
+            )
+            st.session_state[f"last_{clave}"] = elegido
             valores[parametro.nombre] = (
                 int(round(float(elegido))) if parametro.es_entero else float(elegido)
             )
+        etiquetas = {
+            parametro.nombre: PLANTILLA_PARAMETROS_SPEC.get(
+                parametro.nombre, {}
+            ).get("label", parametro.nombre)
+            for parametro in parametros
+        }
+        errores = validar_parametros(valores, etiquetas)
+        if errores:
+            for mensaje in errores:
+                st.error(mensaje)
+        declarados = {
+            parametro.nombre: (
+                int(round(parametro.valor)) if parametro.es_entero else float(parametro.valor)
+            )
+            for parametro in parametros
+        }
+        seguros = valores_seguros("plantilla", valores, declarados)
+        if not valores:
+            seguros = plantilla_parametros_activos()
         if valores:
-            st.caption("Valores actuales · " + _formato_parametros(valores))
+            st.caption("Valores actuales · " + _formato_parametros(seguros or valores))
         restablecer_col, simular_col = st.columns(2)
         with restablecer_col:
             st.button(
@@ -5970,12 +6304,13 @@ def render_plantilla_variables(source: str) -> tuple[dict, bool]:
                 key="btn_simular_plantilla",
                 type="primary",
                 use_container_width=True,
+                disabled=bool(errores),
                 help=(
                     "Ejecuta una nueva prueba con los parámetros actuales y añade una "
                     "curva a la gráfica comparativa."
                 ),
             )
-    return (valores or plantilla_parametros_activos()), simular_clicked
+    return (seguros or valores or plantilla_parametros_activos()), simular_clicked, errores
 
 
 def render_plantilla_inicial_editor(asset, initial_cap) -> None:
@@ -5996,11 +6331,16 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
         )
 
     with st.container(key="principal-editor-panel"):
+        sync_state, sync_message = editor_sync_status(
+            "", str(st.session_state.get(PLANTILLA_EDITOR_KEY, ""))
+        )
         st.markdown(
-            '<div class="editor-header"><span class="dot">●</span> '
+            f'<div class="editor-header"><span class="dot">●</span> '
             '<span title="Borrador temporal en memoria: no se escribe en disco hasta '
             'pulsar «Guardar como…».">⭐ Plantilla inicial del Laboratorio</span>'
-            '<span class="editor-provenance">Borrador temporal · sin guardar</span></div>',
+            '<span class="editor-provenance">Borrador temporal · sin guardar</span>'
+            f'<span class="editor-sync-status {sync_state.replace("_", "-")}">'
+            f'{escape(sync_message)}</span></div>',
             unsafe_allow_html=True,
         )
         with st.popover("ℹ️ ¿Qué hace esta plantilla?"):
@@ -6018,14 +6358,7 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
         st.session_state[PLANTILLA_CODE_KEY] = source
 
         validacion_guardar = validate_strategy_source(source, "estrategia.py")
-        save_col, run_col, ai_col = st.columns([1, 1.1, 1.5], gap="small")
-        with save_col:
-            save_as_clicked = st.button(
-                "💾 Guardar como…",
-                key="btn_save_as_plantilla",
-                disabled=not validacion_guardar["valid"],
-                use_container_width=True,
-            )
+        run_col, ai_col = st.columns([1.1, 1.5], gap="small")
         with run_col:
             run_clicked = st.button(
                 "▶ Ejecutar Backtest",
@@ -6050,11 +6383,24 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
                 + " ".join(validacion_guardar["errors"])
             )
 
+        save_col2 = st.columns([1])[0]  # placeholder to keep layout
+        with save_col2:
+            save_as_clicked = st.button(
+                "💾 Guardar como…",
+                key="btn_save_as_plantilla",
+                disabled=not validacion_guardar["valid"],
+                use_container_width=True,
+            )
         variables_col, historial_col = st.columns([1, 1], gap="medium")
         with variables_col:
-            valores_variables, simular_clicked = render_plantilla_variables(source)
+            valores_variables, simular_clicked, errores_vars = render_plantilla_variables(source)
         with historial_col:
             render_simulaciones_panel("")
+
+        # Bloquear botones si hay errores de parámetros
+        if errores_vars:
+            run_clicked = False
+            ai_clicked = False
 
         PARAMETROS_ACTIVOS.clear()
         PARAMETROS_ACTIVOS.update(valores_variables)
@@ -6115,7 +6461,7 @@ def render_principal_editor(script: str, asset, initial_cap) -> None:
             unsafe_allow_html=True,
         )
         st.markdown("**Parámetros de esta estrategia**")
-        render_strategy_parameters(script, source, "principal")
+        _, errores_pr = render_strategy_parameters(script, source, "principal")
         if st.session_state.get("editor_undo_error"):
             st.error(st.session_state.pop("editor_undo_error"))
 
@@ -6141,9 +6487,15 @@ def render_principal_editor(script: str, asset, initial_cap) -> None:
                 type="primary",
                 key="btn_run",
                 use_container_width=True,
+                disabled=bool(errores_pr),
             )
         with ai_col:
-            ai_clicked = st.button("🪄 Optimizar con IA", key="btn_ai", use_container_width=True)
+            ai_clicked = st.button(
+                "🪄 Optimizar con IA",
+                key="btn_ai",
+                use_container_width=True,
+                disabled=bool(errores_pr),
+            )
         save_as_col, name_col = st.columns([1, 2])
         with name_col:
             save_as_default = (
@@ -6334,42 +6686,109 @@ def _cae_en_rejilla(valor: float, minimo: float, paso: float) -> bool:
 
 
 def control_parametro(prm, prefijo: str) -> float:
-    """Un control para un parámetro detectado, con el rango y el paso que sugiere el parser.
+    """Un control por parámetro con slider + campo numérico sincronizados.
 
-    Dos ajustes sobre lo que devuelve `sugerir_rango`, que es una heurística por nombre:
-
-    * `Parametro.es_entero` manda sobre el paso y sobre el tipo de salida. El parser
-      guarda `valor` ya convertido a float, así que la comprobación de entero de
-      `sugerir_rango` nunca se cumple y propone pasos decimales (0.6 para `fast_ma=12`).
-      Ni el paso ni el valor pueden quedar decimales: `rolling(window=12.0)` también
-      revienta, así que un parámetro entero se devuelve como `int`.
-    * Si el valor de la estrategia no cae en la rejilla del paso (p. ej.
-      `pct_capital_escalon` = 0.3 con paso 1.0) se usa `number_input` con los mismos
-      límites, porque un slider redondearía el valor al primer clic.
+    Siempre muestra un slider canónico (`prefijo+clave`) y un `number_input`
+    espejo (`prefijo+clave}_num`) en una fila [4,1]. La sincronización ocurre en
+    `sincronizar_control` al inicio del run, así que nunca hay escritura cruzada
+    entre widgets ya montados. El valor devuelto es el que se usará para este run.
     """
-    minimo, maximo, paso = (float(v) for v in strategy_parser.sugerir_rango(prm.nombre, prm.valor))
+    minimo, maximo, paso = (
+        float(v) for v in strategy_parser.sugerir_rango(prm.nombre, prm.valor)
+    )
     valor = float(prm.valor)
 
     if prm.es_entero:
-        paso = float(max(1, round(paso)))
-        minimo = float(round(minimo))
-        maximo = float(max(round(maximo), round(valor) + paso))
-        valor = float(round(valor))
-
-    clave = f"{prefijo}{prm.clave}"
-    if maximo > minimo and _cae_en_rejilla(valor, minimo, paso):
-        elegido = st.slider(prm.nombre, min_value=minimo, max_value=maximo, value=valor,
-                             step=paso, key=clave)
+        # Enteros NATIVOS en los widgets: con float Streamlit almacena `10.0` y ese
+        # valor llega a `rolling(window=...)`, que exige un `int`.
+        paso = max(1, int(round(paso)))
+        minimo = int(round(minimo))
+        maximo = int(max(round(maximo), round(valor) + paso))
+        valor = int(round(valor))
     else:
-        elegido = st.number_input(prm.nombre, min_value=minimo, max_value=maximo, value=valor,
-                                  step=paso, key=clave)
+        maximo = float(round(maximo, 6))
+        minimo = float(round(minimo, 6))
+        paso = float(round(paso, 6)) if paso != 0 else 0.01
+
+    spec = {
+        "label": prm.nombre,
+        "min": minimo,
+        "max": maximo,
+        "step": paso,
+        "default": valor,
+    }
+    clave = f"{prefijo}{prm.clave}"
+    puede_sl = maximo > minimo and _cae_en_rejilla(valor, minimo, paso)
+    if puede_sl and paso <= 0:
+        puede_sl = False
+    sincronizar_control(clave, spec, prm.es_entero, con_slider=puede_sl, inicial=valor)
+    elegido = st.session_state.get(clave, valor)
+
+    ayuda = (
+        f"Rango {spec['min']} – {spec['max']} · valor por defecto {spec['default']}"
+        f" · clave: {clave}"
+    )
+    with st.container(border=False):
+        row = st.columns([4, 1])
+        with row[0]:
+            if puede_sl:
+                elegido = st.slider(
+                    spec["label"],
+                    min_value=minimo,
+                    max_value=maximo,
+                    value=elegido,
+                    step=paso,
+                    key=clave,
+                    help=ayuda,
+                )
+            else:
+                elegido = st.number_input(
+                    spec["label"],
+                    min_value=minimo,
+                    max_value=maximo,
+                    value=elegido,
+                    step=paso,
+                    key=clave,
+                    help=ayuda,
+                )
+        with row[1]:
+            st.number_input(
+                prm.nombre,
+                min_value=minimo,
+                max_value=maximo,
+                value=elegido,
+                step=paso,
+                key=_clave_espejo(clave),
+                label_visibility="collapsed",
+                help=ayuda,
+            )
+    # Tras instanciar SOLO se lee: `sincronizar_control` ya corrigió antes de montar
+    # y el propio widget clampa; escribir en claves de widget instanciado rompería el run.
+    elegido = _valor_ajustado(elegido, spec, prm.es_entero, con_slider=puede_sl)
+    st.session_state[f"last_{clave}"] = elegido
     return int(round(elegido)) if prm.es_entero else float(elegido)
+
+
+def _declarados_nativos(info) -> dict:
+    """Valores por defecto del código con su tipo nativo (int si el parser marca entero).
+
+    `Parametro.valor` se guarda SIEMPRE como float en el parser; si este mapa se
+    construye con `float(...)` y los valores actuales son incoherentes, el motor
+    recibiría `10.0` en `rolling(window=...)` y pandas lanzaría «window must be an
+    integer». Con int nativo el fallback es ejecutable y fiel al código.
+    """
+    return {
+        parametro.clave: (
+            int(round(parametro.valor)) if parametro.es_entero else float(parametro.valor)
+        )
+        for parametro in info.parametros
+    }
 
 
 def render_strategy_parameters(
     script: str, source: str, editor_kind: str
-) -> dict:
-    """Render parameter controls owned by one strategy editor and return their values."""
+) -> tuple[dict, list[str]]:
+    """Render parameter controls owned by one strategy editor and return (values, errores)."""
     name = strategy_filename(script)
     info = strategy_parser.analizar_fuente(source, nombre=name)
     values = {}
@@ -6389,18 +6808,40 @@ def render_strategy_parameters(
                 st.caption(category)
             for parameter in parameters:
                 values[parameter.clave] = control_parametro(parameter, prefix)
+    errores = validar_parametros(values)
+    if errores:
+        for mensaje in errores:
+            st.error(mensaje)
     if editor_kind == "principal":
+        declarados = _declarados_nativos(info)
+        if not errores:
+            registro = dict(st.session_state.get(PARAMETROS_VALIDOS_KEY) or {})
+            registro["principal"] = dict(values)
+            st.session_state[PARAMETROS_VALIDOS_KEY] = registro
+        seguros = valores_seguros("principal", values, declarados)
         PARAMETROS_ACTIVOS.clear()
-        PARAMETROS_ACTIVOS.update(values)
+        PARAMETROS_ACTIVOS.update(seguros or values)
     else:
         all_values = dict(st.session_state.get(COMPARE_PARAMETERS_KEY) or {})
         all_values[script] = values
         st.session_state[COMPARE_PARAMETERS_KEY] = all_values
-    return values
+        declarados = _declarados_nativos(info)
+        registro = dict(st.session_state.get(PARAMETROS_VALIDOS_KEY) or {})
+        key_scope = f"comparativa:{script}"
+        if not errores:
+            registro[key_scope] = dict(values)
+            st.session_state[PARAMETROS_VALIDOS_KEY] = registro
+        valores_seguros(key_scope, values, declarados)
+    return values, errores
 
 
 def strategy_parameter_state(script: str, editor_kind: str) -> dict:
-    """Read saved widget overrides before the app resolves its strategy results."""
+    """Read saved widget overrides before the app resolves its strategy results.
+
+    Devuelve valores seguros para el ámbito (respeta el último válido si existe
+    alguna incoherencia). También sincroniza controles si aparecen con valor fuera
+    de rango entre runs, para que la caché y el render coincidan.
+    """
     if editor_kind == "comparison":
         source = editor_source_for(script, editor_kind="comparison")
         prefix = f"compare_param_{script}_"
@@ -6418,16 +6859,35 @@ def strategy_parameter_state(script: str, editor_kind: str) -> dict:
     info = strategy_parser.analizar_fuente(
         source, nombre=strategy_filename(script)
     )
-    values = {}
+    valores = {}
     for parameter in info.parametros:
         key = f"{prefix}{parameter.clave}"
         value = st.session_state.get(key, parameter.valor)
-        values[parameter.clave] = (
-            int(round(float(value)))
-            if parameter.es_entero
-            else float(value)
-        )
-    return values
+        if parameter.nombre in ("fast_ma", "slow_ma") or parameter.es_entero:
+            try:
+                v = int(round(float(value)))
+            except (TypeError, ValueError):
+                v = int(round(float(parameter.valor)))
+            if parameter.nombre == "fast_ma":
+                v = max(2, min(100, v))
+            if parameter.nombre == "slow_ma":
+                v = max(3, min(200, v))
+            valores[parameter.clave] = v
+        else:
+            valores[parameter.clave] = float(value)
+    declarados = _declarados_nativos(info)
+    if editor_kind == "comparison":
+        scope = f"comparativa:{script}"
+    else:
+        scope = "principal"
+    seg = valores_seguros(scope, valores, declarados)
+    for k in ("fast_ma", "slow_ma"):
+        if k in seg:
+            try:
+                seg[k] = int(round(float(seg[k])))
+            except Exception:
+                pass
+    return seg
 
 
 def request_editor_undo(script: str, editor_kind: str) -> None:
@@ -6658,11 +7118,11 @@ else:
     # inicial: sus parámetros vigentes alimentan la corrida y la huella de la caché, de
     # modo que mover un control invalida el resultado anterior sin ejecutar nada.
     PARAMETROS_ACTIVOS.update(plantilla_parametros_activos())
-comparison_script = (st.session_state.get(COMPARE_KEY) or [None])[0]
-if comparison_script:
+comparison_script_cur = (st.session_state.get(COMPARE_KEY) or [None])[0]
+if comparison_script_cur:
     comparison_parameters = dict(st.session_state.get(COMPARE_PARAMETERS_KEY) or {})
-    comparison_parameters[comparison_script] = strategy_parameter_state(
-        comparison_script, "comparison"
+    comparison_parameters[comparison_script_cur] = strategy_parameter_state(
+        comparison_script_cur, "comparison"
     )
     st.session_state[COMPARE_PARAMETERS_KEY] = comparison_parameters
 fast_period = int(PARAMETROS_ACTIVOS.get("fast_ma", DEFAULT_FAST_MA))
@@ -7049,6 +7509,30 @@ def render_other_workspace(tab: str) -> None:
         )
 
 
+def render_lab_context_bar() -> None:
+    """Insignias de contexto del Laboratorio: estrategia, activo y estado del backtest.
+
+    Es el contexto del Laboratorio y solo puede vivir dentro de su vista: la barra
+    global conserva únicamente la marca y el entorno.
+    """
+    if metrics.get("standby"):
+        backtest_status, status_class = "Backtest en espera", "waiting"
+    elif metrics.get("error"):
+        backtest_status, status_class = "Backtest con error", "error"
+    else:
+        backtest_status, status_class = "Backtest disponible", "ready"
+    st.markdown(
+        f"""
+<div class="lab-context">
+    <span class="badge">Estrategia · {escape(etiqueta_principal)}</span>
+    <span class="badge">Activo de trabajo · {escape(str(asset))}</span>
+    <span class="badge status {status_class}">{backtest_status}</span>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 def render_laboratorio_inicial() -> None:
     """Pantalla inicial del Laboratorio: plantilla a la izquierda, resultados a la derecha.
 
@@ -7075,6 +7559,14 @@ def render_laboratorio_inicial() -> None:
 """,
         unsafe_allow_html=True,
     )
+
+    if metrics.get("standby"):
+        st.info(
+            "💤 **Backtest en espera: selecciona una estrategia.** Abre una estrategia "
+            "con «📂 Abrir Estrategia» en el panel izquierdo; hasta entonces no se "
+            "ejecuta ningún backtest."
+        )
+    render_lab_context_bar()
 
     hay_resultado = not metrics.get("standby") and not metrics.get("error")
     sim_curvas = simulaciones_curvas("")
@@ -7248,22 +7740,11 @@ def render_laboratorio_center() -> None:
             "Pulsa «Ejecutar Backtest» cuando quieras evaluarla."
         )
 
-    if metrics.get("standby"):
-        backtest_status, status_class = "Backtest en espera", "waiting"
-    elif metrics.get("error"):
-        backtest_status, status_class = "Backtest con error", "error"
-    else:
-        backtest_status, status_class = "Backtest disponible", "ready"
-    st.markdown(
-        f"""
-<div class="lab-context">
-    <span class="badge">Estrategia · {escape(etiqueta_principal)}</span>
-    <span class="badge">Activo de trabajo · {escape(str(asset))}</span>
-    <span class="badge status {status_class}">{backtest_status}</span>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    # Mostrar aviso si los resultados mostrados corresponden a una configuración anterior
+    if st.session_state.get(RESULT_STALE_KEY):
+        st.info("Los resultados mostrados corresponden a una configuración anterior. Pulsa «▶ Ejecutar Backtest» para actualizarlos.")
+
+    render_lab_context_bar()
     with st.expander("Información técnica", expanded=False):
         st.caption(f"Identificador interno del motor · {ENGINE_VERSION}")
 
@@ -7355,6 +7836,7 @@ def render_laboratorio_center() -> None:
     )
 
     comparative_curves = []
+    stale_comparatives = st.session_state.get(COMPARE_STALE_KEY) or set()
     for script in compare_scripts[:MAX_COMPARATIVES]:
         payload = compare_results.get(script) or {}
         curve_df, curve_metrics = payload.get("df"), payload.get("metrics") or {}
@@ -7364,6 +7846,8 @@ def render_laboratorio_center() -> None:
             "equity": curve_df["Equity"] if curve_df is not None else pd.Series(dtype=float),
             "metrics": curve_metrics,
         })
+    if stale_comparatives:
+        st.caption("Resultados comparativos de una configuración anterior.")
 
     fig = build_equity_figure(
         df_res,
