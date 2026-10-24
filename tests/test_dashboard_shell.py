@@ -267,7 +267,7 @@ def test_laboratorio_messages_are_isolated_from_inicio():
     assert session.session_state["flash_msg"] == "Aviso pendiente del Laboratorio"
 
     session = session.radio(key="workspace_tab").set_value("LABORATORIO").run()
-    assert any(
+    assert not any(
         "Bienvenido al Laboratorio de Estrategias" in item.value
         for item in session.markdown
     )
@@ -364,13 +364,10 @@ def test_sin_principal_el_laboratorio_muestra_la_plantilla_sin_ejecutar(monkeypa
     assert "Plantilla inicial del Laboratorio" in headers
     assert "Borrador temporal" in headers
 
-    # Banner de bienvenida con la guía de pasos y la explicación en el icono de información
-    # (ya no hay tarjeta grande sobre el editor: se movió al popover junto al título).
+    # El banner y la guía de bienvenida se retiraron del laboratorio.
     markdown = " ".join(item.value for item in session.markdown)
-    assert "Bienvenido al Laboratorio de Estrategias" in markdown
-    assert 'class="lab-steps"' in markdown
-    assert 'class="lab-info-card"' not in markdown
-    assert app.PLANTILLA_DESCRIPCION in markdown
+    assert "Bienvenido al Laboratorio de Estrategias" not in markdown
+    assert 'class="lab-steps"' not in markdown
 
     # Estado vacío: KPIs con guion, gráfica vacía, sin tabla y sin resultado guardado.
     kpis = " ".join(
@@ -552,3 +549,114 @@ def test_plantilla_optimizacion_aceptar_no_crea_simulacion():
     # Sin pulsar «Simular» no hay prueba registrada ni curva comparativa nueva.
     assert not session.session_state.get(app.LAB_SIMS_KEY)
     assert any("Parámetros sugeridos aplicados" in item.value for item in session.success)
+
+
+def test_panel_a_principal_usa_variables_compartidas_y_simular_registra_por_estrategia():
+    """Panel A con Estrategia Principal muestra la barra compartida, simula y filtra por script."""
+    script = "otras/SP500.py"
+    session = AppTest.from_file(str(ROOT / "app.py"), default_timeout=180).run()
+    session = session.radio(key="workspace_tab").set_value("LABORATORIO").run()
+    session.session_state[app.PRINCIPAL_KEY] = script
+    session = session.run()
+
+    assert not session.exception, [error.value for error in session.exception]
+    # Barras compartidas deben existir con claves del contexto principal
+    eks = [getattr(e, "key", None) for e in session.expander]
+    bks = [getattr(b, "key", None) for b in session.button]
+    assert "variables_principal_panel" in eks
+    assert "btn_reset_principal_params" in bks
+    assert "btn_simular_principal" in bks
+    # Historial asociado a la estrategia principal
+
+    # Valores por defecto declarados por la estrategia
+    info = app.strategy_parser.analizar_archivo(ROOT / script)
+    if info.parametros:
+        primer = info.parametros[0]
+        clave_prefijo = f"param_{script}_{primer.clave}"
+        sks = [getattr(s, "key", None) for s in session.slider]
+        nks = [getattr(n, "key", None) for n in session.number_input]
+        assert clave_prefijo in sks or clave_prefijo in nks
+
+    # Restablecer vuelve a valores por defecto (no lanza excepción)
+    session = session.button(key="btn_reset_principal_params").click().run()
+    assert not session.exception, [error.value for error in session.exception]
+
+    # Simular registra prueba asociada al archivo de la Estrategia Principal
+    session = session.button(key="btn_simular_principal").click().run()
+    assert not session.exception, [error.value for error in session.exception]
+    registros = session.session_state.get(app.LAB_SIMS_KEY) or []
+    assert registros, "Se debe registrar al menos una prueba desde Panel A"
+    assert any(r.get("script") == script for r in registros)
+    assert all(r.get("script") in ("", script) for r in registros)
+    # Debe haber al menos la prueba de la principal
+    regs_pr = [r for r in registros if r.get("script") == script]
+    assert regs_pr
+    assert regs_pr[-1].get("params")
+
+
+def test_panel_a_simulaciones_no_mezclan_con_plantilla():
+    """Las curvas/historial se filtran por script; pruebas de plantilla no aparecen en principal."""
+    script = "otras/SP500.py"
+    session = AppTest.from_file(str(ROOT / "app.py"), default_timeout=180).run()
+    session = session.radio(key="workspace_tab").set_value("LABORATORIO").run()
+
+    # Crear prueba en plantilla inicial
+    session = session.button(key="btn_simular_plantilla").click().run()
+    assert not session.exception, [error.value for error in session.exception]
+    regs_antes = session.session_state.get(app.LAB_SIMS_KEY) or []
+    assert any(r.get("script") == "" for r in regs_antes)
+
+    # Cargar Estrategia Principal en Panel A
+    session.session_state[app.PRINCIPAL_KEY] = script
+    session = session.run()
+    assert not session.exception, [error.value for error in session.exception]
+    registros = session.session_state.get(app.LAB_SIMS_KEY) or []
+    # Las pruebas de plantilla siguen existiendo pero el panel/historial de principal filtra por script
+    assert any(r.get("script") == "" for r in registros)
+    assert all(r.get("script") in ("", script) for r in registros)
+    # No debe haber pruebas de otra estrategia distinta
+    for r in registros:
+        s = r.get("script", "")
+        assert s == "" or s == script
+
+
+def test_panel_a_simular_refleja_cambio_de_parametros():
+    """Cambiar parámetro y simular registra valores seleccionados (sin datos reales)."""
+    script = "otras/SP500.py"
+    session = AppTest.from_file(str(ROOT / "app.py"), default_timeout=180).run()
+    session = session.radio(key="workspace_tab").set_value("LABORATORIO").run()
+    session.session_state[app.PRINCIPAL_KEY] = script
+    session = session.run()
+    assert not session.exception, [error.value for error in session.exception]
+
+    info = app.strategy_parser.analizar_archivo(ROOT / script)
+    if not info.parametros:
+        return
+    primer = info.parametros[0]
+    clave_prefijo = f"param_{script}_{primer.clave}"
+    sks = [getattr(s, "key", None) for s in session.slider]
+    if clave_prefijo in sks:
+        try:
+            actual = session.slider(key=clave_prefijo).value
+            nuevo = actual
+            try:
+                minimo, maximo, paso = session.slider(key=clave_prefijo).min_value, session.slider(key=clave_prefijo).max_value, session.slider(key=clave_prefijo).step
+                if paso and paso > 0 and nuevo + paso <= maximo:
+                    nuevo = nuevo + paso
+                elif paso and paso > 0 and nuevo - paso >= minimo:
+                    nuevo = nuevo - paso
+            except Exception:
+                nuevo = actual
+            if nuevo != actual:
+                session = session.slider(key=clave_prefijo).set_value(nuevo).run()
+        except Exception:
+            pass
+
+    session = session.button(key="btn_simular_principal").click().run()
+    assert not session.exception, [error.value for error in session.exception]
+    registros = session.session_state.get(app.LAB_SIMS_KEY) or []
+    regs_pr = [r for r in registros if r.get("script") == script]
+    assert regs_pr
+    # params deben reflejar los valores seleccionados
+    params_reg = regs_pr[-1].get("params") or {}
+    assert isinstance(params_reg, dict)

@@ -8,6 +8,7 @@ import re
 import sys
 import uuid
 from datetime import datetime
+from contextlib import nullcontext
 from html import escape
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from panels.panel_a import render_panel_a
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from plotly.subplots import make_subplots
@@ -237,6 +239,20 @@ st.markdown(
         overflow-y: auto;
         overscroll-behavior: contain;
         scrollbar-gutter: stable;
+    }
+    /* Panel A activo: fondo verde tenue en sus dos columnas. El marcador solo se
+       emite en la rama activa; la clave acota el color a la distribución creada
+       por render_panel_a() y evita tocar la vista inicial o los paneles laterales. */
+    .panel-a-active-marker { display: none !important; }
+    body:has(.panel-a-active-marker)
+    .st-key-panel-a-layout > [data-testid="stLayoutWrapper"]
+    > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        background-color: #EAF5E9;
+        border-radius: 10px;
+    }
+    body:has(.panel-a-active-marker)
+    .st-key-panel-a-layout .st-key-principal-editor-panel {
+        background-color: #EAF5E9;
     }
     .workspace-empty {
         border: 1px dashed #cbd5e1; border-radius: 12px; background: #f8fafc;
@@ -815,6 +831,24 @@ st.markdown(
         display: inline-flex; align-items: center; justify-content: center;
         width: 18px; height: 18px; border-radius: 50%;
         background: #2563eb; color: #ffffff; font-size: 11px;
+    }
+    /* Aviso de resultados anteriores: reglas acotadas a su contenedor con clave
+       (st.container(key="backtest-stale-notice")) para que el aviso y su contenido
+       respeten el ancho disponible del panel, salten de línea y no se recorten ni
+       se oculten. No afectan al resto de st.info de la aplicación. */
+    .st-key-backtest-stale-notice,
+    .st-key-backtest-stale-notice [data-testid="stAlert"],
+    .st-key-backtest-stale-notice [data-testid="stAlertContentInfo"],
+    .st-key-backtest-stale-notice [data-testid="stMarkdown"],
+    .st-key-backtest-stale-notice [data-testid="stMarkdownContainer"],
+    .st-key-backtest-stale-notice [data-testid="stMarkdownContainer"] p {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: normal;
     }
     .lab-empty-chart {
         border: 1px dashed #cbd5e1; border-radius: 10px; background: #f8fafc;
@@ -3128,11 +3162,71 @@ def _sello_codigo_estrategia(script: str) -> tuple[str, str]:
     return ("sha256", hashlib.sha256(source).hexdigest())
 
 
+def _fechas_prueba():
+    """Devuelve las fechas elegidas en la interfaz en formato ISO.
+
+    Ya NO valida el orden del rango: el laboratorio debe seguir renderizando aunque
+    el usuario haya dejado la fecha de fin antes de la de inicio. La validación vive
+    en `_error_fechas_prueba`, que consultan los botones de ejecución y los guardas
+    de caché antes de usar el motor, para que un rango inválido nunca lance una
+    excepción sin controlar durante el render ni destruya el estado del editor.
+    """
+    from datetime import date, datetime
+    inicio = st.session_state.get("prueba_fecha_inicio")
+    fin = st.session_state.get("prueba_fecha_fin")
+    inicio = inicio.isoformat() if isinstance(inicio, (date, datetime)) else (str(inicio) if inicio else None)
+    fin = fin.isoformat() if isinstance(fin, (date, datetime)) else (str(fin) if fin else None)
+    return inicio, fin
+
+
+def _error_fechas_prueba():
+    """Mensaje de validación si el rango de fechas elegido es inválido; `None` si es válido."""
+    inicio, fin = _fechas_prueba()
+    if inicio and fin and inicio > fin:
+        return "La fecha de inicio debe ser anterior o igual a la fecha de fin."
+    return None
+
+
+FECHAS_AJUSTADAS_KEY = "fechas_prueba_ajustadas_aviso"
+
+
+def _alinear_fecha_inicio() -> None:
+    """Si la nueva fecha inicial queda después de la final, empuja la final al inicio.
+
+    Los callbacks de widgets corren antes de volver a montarlos, que es el único
+    momento seguro para reescribir la clave de otro widget. No toca el editor del
+    laboratorio ni ningún resultado almacenado.
+    """
+    from datetime import date as _date
+    inicio = st.session_state.get("prueba_fecha_inicio")
+    fin = st.session_state.get("prueba_fecha_fin")
+    if isinstance(inicio, _date) and isinstance(fin, _date) and inicio > fin:
+        st.session_state["prueba_fecha_fin"] = inicio
+        st.session_state[FECHAS_AJUSTADAS_KEY] = (
+            f"Fecha de fin ajustada al {inicio.isoformat()} para mantener inicio ≤ fin."
+        )
+
+
+def _alinear_fecha_fin() -> None:
+    """Si la nueva fecha final queda antes de la inicial, empuja la inicial a la final."""
+    from datetime import date as _date
+    inicio = st.session_state.get("prueba_fecha_inicio")
+    fin = st.session_state.get("prueba_fecha_fin")
+    if isinstance(inicio, _date) and isinstance(fin, _date) and fin < inicio:
+        st.session_state["prueba_fecha_inicio"] = fin
+        st.session_state[FECHAS_AJUSTADAS_KEY] = (
+            f"Fecha de inicio ajustada al {fin.isoformat()} para mantener inicio ≤ fin."
+        )
+
+
 def _config_lab(ticker, capital, parametros=None):
     """Configuración de la corrida que se envía al motor de qc_lab."""
+    fecha_inicio, fecha_fin = _fechas_prueba()
     return ConfigEjecucion(
         simbolo=str(ticker).upper(),
         capital=float(capital),
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
         comision=COMMISSION_RATE,
         parametros=_sanear_parametros_motor(
             PARAMETROS_ACTIVOS if parametros is None else parametros
@@ -3337,6 +3431,7 @@ def get_comparative_results(scripts, ticker, capital, force=False) -> dict:
     ]
     out = {}
     obsoletas: set = set()
+    error_fechas = _error_fechas_prueba()
     for script in wanted:
         parametros = dict(
             (st.session_state.get(COMPARE_PARAMETERS_KEY) or {}).get(script) or {}
@@ -3346,6 +3441,7 @@ def get_comparative_results(scripts, ticker, capital, force=False) -> dict:
             _sello_parametros(parametros),
             float(capital),
             _sello_codigo_estrategia(script),
+            _fechas_prueba(),
         )
         cached = cache.get(script)
         if cached is not None and cached.get("params") == stamp:
@@ -3360,6 +3456,14 @@ def get_comparative_results(scripts, ticker, capital, force=False) -> dict:
             # resultado y se marca como anterior a la configuración vigente.
             obsoletas.add(script)
             out[script] = cached
+            continue
+        if error_fechas:
+            # Con fechas inválidas no se ejecuta: se conserva el resultado previo
+            # (marcado como anterior si ya no corresponde) o se omite la comparativa
+            # hasta que el período pueda corregirse.
+            if cached is not None:
+                obsoletas.add(script)
+                out[script] = cached
             continue
         df, metrics = _ejecutar_comparativa(
             script, ticker, capital, parametros
@@ -3431,6 +3535,7 @@ def _sello_plantilla(ticker, capital) -> tuple:
         float(capital),
         _sello_parametros(),
         hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        _fechas_prueba(),
     )
 
 
@@ -3513,9 +3618,21 @@ def get_backtest_result(ticker, capital, force=False):
         _sello_parametros(),
         float(capital),
         _sello_codigo_estrategia(script),
+        _fechas_prueba(),
     )
     cached = st.session_state.get(RESULT_KEY)
     guardado = st.session_state.get(PARAMS_KEY)
+
+    error_fechas = _error_fechas_prueba()
+    if error_fechas:
+        # Con fechas inválidas no se ejecuta nada: se conserva el último resultado
+        # (marcado como anterior si ya no corresponde a la configuración vigente) y
+        # la interfaz muestra el aviso de validación por separado del aviso stale.
+        if cached is not None:
+            if guardado != params:
+                st.session_state[RESULT_STALE_KEY] = True
+            return cached["df"], cached["metrics"]
+        return resultado_en_espera(ticker, capital)
 
     if cached is not None and not force:
         if guardado == params:
@@ -4220,6 +4337,11 @@ def render_draft_area(base_values: dict, ticker, fast_ma, slow_ma, capital):
         if probar:
             if not codigo_borrador.strip():
                 st.warning("El borrador está vacío: no hay nada que probar.")
+            elif _error_fechas_prueba():
+                st.error(
+                    f"{_error_fechas_prueba()} Corrige el período antes de probar el "
+                    "borrador; el código y los resultados anteriores se conservan."
+                )
             else:
                 with st.spinner("🧪 Ejecutando el backtest del borrador..."):
                     try:
@@ -5477,6 +5599,13 @@ def _ejecutar_plantilla(asset, initial_cap) -> None:
     if not source.strip():
         st.warning("La plantilla está vacía: no hay nada que ejecutar.")
         return
+    error_fechas = _error_fechas_prueba()
+    if error_fechas:
+        st.error(
+            f"{error_fechas} Corrige el período en «Período del backtest» antes de "
+            "ejecutar: el código del editor y los resultados anteriores se conservan."
+        )
+        return
     validacion = validate_strategy_source(source, "plantilla_inicial.py")
     if not validacion["valid"]:
         st.error("La plantilla no cumple el contrato: " + " ".join(validacion["errors"]))
@@ -5497,6 +5626,7 @@ def _ejecutar_plantilla(asset, initial_cap) -> None:
         float(initial_cap),
         _sello_parametros(),
         hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        _fechas_prueba(),
     )
     st.rerun()
 
@@ -5601,22 +5731,31 @@ def _plantilla_save_as_dialog(source: str) -> None:
         _guardar_plantilla_como(source, target_name, overwrite=existe)
 
 
-def _reset_plantilla_parametros() -> None:
-    """Devuelve los controles del borrador a los valores por defecto de la plantilla.
+def _reset_variables_parametros(source: str, editor_kind: str, script: str = "") -> None:
+    """Devuelve los controles de la barra compartida a los valores por defecto.
 
-    Corre como `on_click` del botón «Restablecer valores»: los callbacks se ejecutan
-    antes de volver a montar los widgets, que es el único momento seguro para reescribir
-    claves de widgets ya instanciados. No toca ningún archivo guardado.
+    Corre como `on_click` del botón «Restablecer»: los callbacks se ejecutan antes de
+    volver a montar los widgets, que es el único momento seguro para reescribir claves
+    de widgets ya instanciados. No toca ningún archivo guardado.
     """
+    info = strategy_parser.analizar_fuente(
+        str(source or ""),
+        nombre="plantilla_inicial.py" if editor_kind == "plantilla" else strategy_filename(script),
+    )
+    ctx = _variables_context(editor_kind, script)
+    for parametro in info.parametros:
+        spec = _spec_variable(parametro, editor_kind)
+        st.session_state[f"{ctx['prefix']}{parametro.clave}"] = spec["default"]
+
+
+def _reset_plantilla_parametros() -> None:
+    """Compatibilidad con el botón histórico del borrador inicial."""
     source = str(
         st.session_state.get(PLANTILLA_EDITOR_KEY)
         or st.session_state.get(PLANTILLA_CODE_KEY)
         or PLANTILLA_INICIAL
     )
-    info = strategy_parser.analizar_fuente(source, nombre="plantilla_inicial.py")
-    for parametro in info.parametros:
-        spec = plantilla_parametro_spec(parametro)
-        st.session_state[f"{PLANTILLA_PARAM_PREFIX}{parametro.nombre}"] = spec["default"]
+    _reset_variables_parametros(source, "plantilla")
 
 
 # -----------------------------------------------------------------------------
@@ -5685,16 +5824,31 @@ def registrar_simulacion(frame, metrics, asset, script, source, parametros) -> d
     return registro
 
 
-def _simular_plantilla(source: str, asset, initial_cap) -> None:
-    """Ejecuta una simulación visible con el código y los parámetros actuales."""
+def _simular_variables(
+    source: str,
+    asset,
+    initial_cap,
+    *,
+    script: str,
+    parametros: dict,
+    validation_name: str,
+    empty_message: str,
+) -> None:
+    """Ejecuta una simulación visible y la registra en el ámbito indicado."""
     source = str(source or "")
     if not source.strip():
-        st.warning("La plantilla está vacía: no hay nada que simular.")
+        st.warning(empty_message)
         return
-    validacion = validate_strategy_source(source, "plantilla_inicial.py")
+    error_fechas = _error_fechas_prueba()
+    if error_fechas:
+        st.error(f"{error_fechas} Corrige el período antes de simular.")
+        return
+    validacion = validate_strategy_source(source, validation_name)
     if not validacion["valid"]:
         st.error("No se puede simular: " + " ".join(validacion["errors"]))
         return
+    PARAMETROS_ACTIVOS.clear()
+    PARAMETROS_ACTIVOS.update(dict(parametros or {}))
     with st.spinner("Ejecutando una simulación con los parámetros actuales…"):
         try:
             frame, sim_metrics = run_source_backtest(
@@ -5704,13 +5858,47 @@ def _simular_plantilla(source: str, asset, initial_cap) -> None:
             st.error(f"La simulación falló: {type(exc).__name__}: {exc}")
             return
     registrar_simulacion(
-        frame, sim_metrics, asset, "", source, dict(PARAMETROS_ACTIVOS)
+        frame, sim_metrics, asset, script, source, dict(parametros or {})
     )
     st.toast(
         "Prueba registrada. Se añadió una curva a la gráfica comparativa.",
         icon="✅",
     )
     st.rerun()
+
+
+def _simular_plantilla(
+    source: str, asset, initial_cap, parametros: dict | None = None
+) -> None:
+    """Simulación del borrador inicial, con su historial y sus claves de sesión."""
+    _simular_variables(
+        source,
+        asset,
+        initial_cap,
+        script="",
+        parametros=parametros if parametros is not None else dict(PARAMETROS_ACTIVOS),
+        validation_name="plantilla_inicial.py",
+        empty_message="La plantilla está vacía: no hay nada que simular.",
+    )
+
+
+def _simular_principal(
+    script: str,
+    source: str,
+    asset,
+    initial_cap,
+    parametros: dict | None = None,
+) -> None:
+    """Simulación de la Estrategia Principal con el mismo flujo que la plantilla."""
+    _simular_variables(
+        source,
+        asset,
+        initial_cap,
+        script=script,
+        parametros=parametros if parametros is not None else dict(PARAMETROS_ACTIVOS),
+        validation_name=strategy_filename(script),
+        empty_message="La estrategia está vacía: no hay nada que simular.",
+    )
 
 
 def simulaciones_curvas(script: str = "") -> list:
@@ -6044,6 +6232,10 @@ def _ejecutar_optimizacion_plantilla(source, asset, initial_cap) -> None:
     if not source.strip():
         st.warning("El editor está vacío: no hay estrategia que optimizar.")
         return
+    error_fechas = _error_fechas_prueba()
+    if error_fechas:
+        st.error(f"{error_fechas} Corrige el período antes de optimizar.")
+        return
     validacion = validate_strategy_source(source, "plantilla_inicial.py")
     if not validacion["valid"]:
         st.error("No se puede optimizar: " + " ".join(validacion["errors"]))
@@ -6167,111 +6359,165 @@ def render_propuesta_optimizacion() -> None:
             )
 
 
-def render_plantilla_variables(source: str) -> tuple[dict, bool, list[str]]:
-    """Barra plegable «Variables de la estrategia» del borrador inicial.
+def _variables_context(editor_kind: str, script: str = "") -> dict:
+    """Claves y ámbito de la barra de variables para cada editor."""
+    if editor_kind == "principal":
+        return {
+            "editor_kind": "principal",
+            "script": script,
+            "scope": "principal",
+            "prefix": f"param_{script}_",
+            "expander": "variables_principal_panel",
+            "reset": "btn_reset_principal_params",
+            "simular": "btn_simular_principal",
+        }
+    return {
+        "editor_kind": "plantilla",
+        "script": "",
+        "scope": "plantilla",
+        "prefix": PLANTILLA_PARAM_PREFIX,
+        "expander": "plantilla_variables_panel",
+        "reset": "btn_reset_plantilla_params",
+        "simular": "btn_simular_plantilla",
+    }
 
-    Muestra un control por cada parámetro que el parser detecta en el código (no inventa
-    variables): usa slider + espejo numérico, sincronizados antes de instanciar.
-    Devuelve `(valores_seguros, simular_pulsado, errores)` para alimentar
-    `PARAMETROS_ACTIVOS` y detectar la acción «Simular» y bloquear botones si hay
-    incoherencias.
+
+def _spec_variable(parametro, editor_kind: str) -> dict:
+    """Rango y etiqueta compartidos; en Principal el valor por defecto sale del código."""
+    spec = dict(plantilla_parametro_spec(parametro))
+    if editor_kind != "principal":
+        return spec
+    default = (
+        int(round(parametro.valor))
+        if parametro.es_entero
+        else float(parametro.valor)
+    )
+    spec["default"] = default
+    if default > spec["max"]:
+        spec["max"] = default + (spec["step"] if spec["step"] > 0 else 1)
+    if default < spec["min"]:
+        spec["min"] = default
+    return spec
+
+
+def _control_variable(parametro, spec: dict, clave: str):
+    """Slider + espejo numérico de un parámetro de la barra compartida de variables."""
+    minimo, maximo, paso = spec["min"], spec["max"], spec["step"]
+    if parametro.es_entero:
+        # Enteros NATIVOS en los widgets: con float (2.0/100.0/1.0) Streamlit
+        # almacena y devuelve `10.0`, y ese float llega a `rolling(window=...)`.
+        paso = max(1, int(round(paso)))
+        minimo = int(round(minimo))
+        maximo = int(max(round(maximo), spec["default"] + paso))
+        default_cur = int(round(spec["default"]))
+    else:
+        maximo = float(round(maximo, 6))
+        minimo = float(round(minimo, 6))
+        paso = float(round(paso, 6)) if paso != 0 else 0.01
+        default_cur = float(spec["default"])
+    spec_cur = {
+        "label": spec["label"],
+        "min": minimo,
+        "max": maximo,
+        "step": paso,
+        "default": default_cur,
+    }
+    puede_sl = maximo > minimo and _cae_en_rejilla(default_cur, minimo, paso)
+    if puede_sl and paso <= 0:
+        puede_sl = False
+    sincronizar_control(
+        clave, spec_cur, parametro.es_entero, con_slider=puede_sl, inicial=default_cur
+    )
+    elegido = st.session_state.get(clave, default_cur)
+    ayuda = (
+        f"Rango {spec_cur['min']} – {spec_cur['max']} · valor por defecto "
+        f"{spec_cur['default']} · clave: {clave}"
+    )
+    row = st.columns([4, 1])
+    with row[0]:
+        if puede_sl:
+            elegido = st.slider(
+                spec_cur["label"],
+                min_value=minimo,
+                max_value=maximo,
+                value=elegido,
+                step=paso,
+                key=clave,
+                help=ayuda,
+            )
+        else:
+            elegido = st.number_input(
+                spec_cur["label"],
+                min_value=minimo,
+                max_value=maximo,
+                value=elegido,
+                step=paso,
+                key=clave,
+                help=ayuda,
+            )
+    with row[1]:
+        st.number_input(
+            parametro.nombre,
+            min_value=minimo,
+            max_value=maximo,
+            value=elegido,
+            step=paso,
+            key=_clave_espejo(clave),
+            label_visibility="collapsed",
+            help=ayuda,
+        )
+    # Tras instanciar SOLO se lee: el valor devuelto por el widget ya está
+    # clamped por el propio Streamlit y `sincronizar_control` corrigió antes
+    # de montar. Escribir en claves de widget ya instanciado rompería el run.
+    elegido = _valor_ajustado(
+        elegido, spec_cur, parametro.es_entero, con_slider=puede_sl
+    )
+    st.session_state[f"last_{clave}"] = elegido
+    return int(round(float(elegido))) if parametro.es_entero else float(elegido)
+
+
+def render_variables_estrategia(
+    source: str, editor_kind: str, script: str = ""
+) -> tuple[dict, bool, list[str]]:
+    """Barra «Variables de la estrategia» compartida por la plantilla y Panel A.
+
+    Los controles, la validación, «Restablecer» y «Simular» se generan una sola vez
+    para ambos editores. El ámbito y las claves de sesión se separan por contexto para
+    que la plantilla, la Principal y la comparativa no compartan valores.
     """
-    info = strategy_parser.analizar_fuente(source, nombre="plantilla_inicial.py")
+    info = strategy_parser.analizar_fuente(
+        source,
+        nombre="plantilla_inicial.py" if editor_kind == "plantilla" else strategy_filename(script),
+    )
     parametros = list(info.parametros)
+    ctx = _variables_context(editor_kind, script)
     valores: dict = {}
     errores: list[str] = []
     simular_clicked = False
     with st.expander(
         "⚙️ Variables de la estrategia",
         expanded=False,
-        key="plantilla_variables_panel",
+        key=ctx["expander"],
     ):
         if not parametros:
             st.caption(
-                "El código del borrador no declara parámetros ajustables con valores por "
-                "defecto. Edítalo o pega una estrategia que sí los declare."
+                "El código no declara parámetros ajustables con valores por defecto. "
+                "Edítalo o pega una estrategia que sí los declare."
             )
-        for parametro in parametros:
-            spec = plantilla_parametro_spec(parametro)
-            clave = f"{PLANTILLA_PARAM_PREFIX}{parametro.nombre}"
-            minimo, maximo, paso = spec["min"], spec["max"], spec["step"]
-            if parametro.es_entero:
-                # Enteros NATIVOS en los widgets: con float (2.0/100.0/1.0) Streamlit
-                # almacena y devuelve `10.0`, y ese float llega a `rolling(window=...)`.
-                paso = max(1, int(round(paso)))
-                minimo = int(round(minimo))
-                maximo = int(max(round(maximo), spec["default"] + paso))
-                default_cur = int(round(spec["default"]))
-            else:
-                maximo = float(round(maximo, 6))
-                minimo = float(round(minimo, 6))
-                paso = float(round(paso, 6)) if paso != 0 else 0.01
-                default_cur = float(spec["default"])
-            spec_cur = {
-                "label": spec["label"],
-                "min": minimo,
-                "max": maximo,
-                "step": paso,
-                "default": default_cur,
-            }
-            puede_sl = maximo > minimo and _cae_en_rejilla(default_cur, minimo, paso)
-            if puede_sl and paso <= 0:
-                puede_sl = False
-            sincronizar_control(
-                clave, spec_cur, parametro.es_entero, con_slider=puede_sl, inicial=default_cur
-            )
-            elegido = st.session_state.get(clave, default_cur)
-            ayuda = (
-                f"Rango {spec_cur['min']} – {spec_cur['max']} · valor por defecto "
-                f"{spec_cur['default']} · clave: {clave}"
-            )
-            row = st.columns([4, 1])
-            with row[0]:
-                if puede_sl:
-                    elegido = st.slider(
-                        spec_cur["label"],
-                        min_value=minimo,
-                        max_value=maximo,
-                        value=elegido,
-                        step=paso,
-                        key=clave,
-                        help=ayuda,
-                    )
-                else:
-                    elegido = st.number_input(
-                        spec_cur["label"],
-                        min_value=minimo,
-                        max_value=maximo,
-                        value=elegido,
-                        step=paso,
-                        key=clave,
-                        help=ayuda,
-                    )
-            with row[1]:
-                st.number_input(
-                    parametro.nombre,
-                    min_value=minimo,
-                    max_value=maximo,
-                    value=elegido,
-                    step=paso,
-                    key=_clave_espejo(clave),
-                    label_visibility="collapsed",
-                    help=ayuda,
-                )
-            # Tras instanciar SOLO se lee: el valor devuelto por el widget ya está
-            # clamped por el propio Streamlit y `sincronizar_control` corrigió antes
-            # de montar. Escribir en claves de widget ya instanciado rompería el run.
-            elegido = _valor_ajustado(
-                elegido, spec_cur, parametro.es_entero, con_slider=puede_sl
-            )
-            st.session_state[f"last_{clave}"] = elegido
-            valores[parametro.nombre] = (
-                int(round(float(elegido))) if parametro.es_entero else float(elegido)
-            )
+        grupos = (
+            info.parametros_por_categoria()
+            if editor_kind == "principal"
+            else {None: parametros}
+        )
+        for categoria, grupo in grupos.items():
+            if editor_kind == "principal" and len(grupos) > 1:
+                st.caption(categoria)
+            for parametro in grupo:
+                spec = _spec_variable(parametro, editor_kind)
+                clave = f"{ctx['prefix']}{parametro.clave}"
+                valores[parametro.clave] = _control_variable(parametro, spec, clave)
         etiquetas = {
-            parametro.nombre: PLANTILLA_PARAMETROS_SPEC.get(
-                parametro.nombre, {}
-            ).get("label", parametro.nombre)
+            parametro.clave: _spec_variable(parametro, editor_kind)["label"]
             for parametro in parametros
         }
         errores = validar_parametros(valores, etiquetas)
@@ -6279,13 +6525,11 @@ def render_plantilla_variables(source: str) -> tuple[dict, bool, list[str]]:
             for mensaje in errores:
                 st.error(mensaje)
         declarados = {
-            parametro.nombre: (
-                int(round(parametro.valor)) if parametro.es_entero else float(parametro.valor)
-            )
+            parametro.clave: _spec_variable(parametro, editor_kind)["default"]
             for parametro in parametros
         }
-        seguros = valores_seguros("plantilla", valores, declarados)
-        if not valores:
+        seguros = valores_seguros(ctx["scope"], valores, declarados)
+        if not valores and editor_kind == "plantilla":
             seguros = plantilla_parametros_activos()
         if valores:
             st.caption("Valores actuales · " + _formato_parametros(seguros or valores))
@@ -6293,15 +6537,16 @@ def render_plantilla_variables(source: str) -> tuple[dict, bool, list[str]]:
         with restablecer_col:
             st.button(
                 "Restablecer",
-                key="btn_reset_plantilla_params",
-                on_click=_reset_plantilla_parametros,
+                key=ctx["reset"],
+                on_click=_reset_variables_parametros,
+                args=(source, editor_kind, script),
                 help="Vuelve a los valores por defecto (no borra pruebas ni resultados).",
                 use_container_width=True,
             )
         with simular_col:
             simular_clicked = st.button(
                 "Simular",
-                key="btn_simular_plantilla",
+                key=ctx["simular"],
                 type="primary",
                 use_container_width=True,
                 disabled=bool(errores),
@@ -6310,7 +6555,13 @@ def render_plantilla_variables(source: str) -> tuple[dict, bool, list[str]]:
                     "curva a la gráfica comparativa."
                 ),
             )
-    return (seguros or valores or plantilla_parametros_activos()), simular_clicked, errores
+    fallback = plantilla_parametros_activos() if editor_kind == "plantilla" else {}
+    return (seguros or valores or fallback), simular_clicked, errores
+
+
+def render_plantilla_variables(source: str) -> tuple[dict, bool, list[str]]:
+    """Compatibilidad: variables del borrador inicial con la misma barra compartida."""
+    return render_variables_estrategia(source, "plantilla")
 
 
 def render_plantilla_inicial_editor(asset, initial_cap) -> None:
@@ -6365,6 +6616,7 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
                 type="primary",
                 key="btn_run_plantilla",
                 use_container_width=True,
+                disabled=_error_fechas_prueba() is not None,
             )
         with ai_col:
             ai_clicked = st.button(
@@ -6408,7 +6660,9 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
         if run_clicked:
             _ejecutar_plantilla(asset, initial_cap)
         if simular_clicked:
-            _simular_plantilla(source, asset, initial_cap)
+            _simular_plantilla(
+                source, asset, initial_cap, parametros=valores_variables
+            )
         if ai_clicked:
             _ejecutar_optimizacion_plantilla(source, asset, initial_cap)
         if save_as_clicked:
@@ -6422,7 +6676,10 @@ def render_plantilla_inicial_editor(asset, initial_cap) -> None:
         render_propuesta_optimizacion()
 
 
-def render_principal_editor(script: str, asset, initial_cap) -> None:
+def render_principal_editor(
+    script: str, asset, initial_cap, *, variables_unificadas: bool = False
+) -> None:
+    errores_pr = []
     if not script:
         render_plantilla_inicial_editor(asset, initial_cap)
         PARAMETROS_ACTIVOS.clear()
@@ -6460,8 +6717,26 @@ def render_principal_editor(script: str, asset, initial_cap) -> None:
             f'<span class="editor-sync-status {state}">{escape(message)}</span></div>',
             unsafe_allow_html=True,
         )
-        st.markdown("**Parámetros de esta estrategia**")
-        _, errores_pr = render_strategy_parameters(script, source, "principal")
+
+        # Selector compacto de activo, sincronizado con Reglas comunes.
+        ticker_ui_key = "ticker_parametros_principal"
+        ticker_actual = st.session_state.get(ACTIVO_KEY, DEFAULT_TICKER)
+
+        if st.session_state.get(ticker_ui_key) != ticker_actual:
+            st.session_state[ticker_ui_key] = ticker_actual
+
+        def _actualizar_ticker_desde_parametros():
+            st.session_state[ACTIVO_KEY] = st.session_state[ticker_ui_key]
+
+        st.selectbox(
+            "Acción / Ticker (Prueba)",
+            opciones_activo_ui(ticker_actual),
+            key=ticker_ui_key,
+            on_change=_actualizar_ticker_desde_parametros,
+        )
+
+
+
         if st.session_state.get("editor_undo_error"):
             st.error(st.session_state.pop("editor_undo_error"))
 
@@ -6487,7 +6762,7 @@ def render_principal_editor(script: str, asset, initial_cap) -> None:
                 type="primary",
                 key="btn_run",
                 use_container_width=True,
-                disabled=bool(errores_pr),
+                disabled=bool(errores_pr) or _error_fechas_prueba() is not None,
             )
         with ai_col:
             ai_clicked = st.button(
@@ -6526,6 +6801,22 @@ def render_principal_editor(script: str, asset, initial_cap) -> None:
         if not save_as_validation["valid"]:
             st.caption("Guardar Como: " + " ".join(save_as_validation["errors"]))
 
+        valores_pr = None
+        simular_clicked = False
+        if variables_unificadas:
+            variables_col, historial_col = st.columns([1, 1], gap="medium")
+            with variables_col:
+                valores_pr, simular_clicked, errores_pr = render_variables_estrategia(
+                    source, "principal", script
+                )
+            with historial_col:
+                render_simulaciones_panel(script)
+            PARAMETROS_ACTIVOS.clear()
+            PARAMETROS_ACTIVOS.update(valores_pr)
+        else:
+            st.markdown("**Parámetros de esta estrategia**")
+            _, errores_pr = render_strategy_parameters(script, source, "principal")
+
         if save_clicked:
             try:
                 save_editor_source(script, source)
@@ -6539,6 +6830,10 @@ def render_principal_editor(script: str, asset, initial_cap) -> None:
         if run_clicked:
             st.session_state["force_run"] = True
             st.rerun()
+        if simular_clicked and variables_unificadas:
+            _simular_principal(
+                script, source, asset, initial_cap, parametros=valores_pr
+            )
         if ai_clicked:
             st.session_state["codigo_actual"] = source
             st.session_state["codigo_actual_script"] = script
@@ -6566,11 +6861,15 @@ def render_editor_panels(script: str, asset, initial_cap) -> None:
     PARAMETROS_ACTIVOS.clear()
     comparison = (st.session_state.get(COMPARE_KEY) or [None])[0]
     if not comparison:
-        render_principal_editor(script, asset, initial_cap)
+        render_principal_editor(
+            script, asset, initial_cap, variables_unificadas=True
+        )
         return
     principal_col, comparison_col = st.columns([1, 1], gap="medium")
     with principal_col:
-        render_principal_editor(script, asset, initial_cap)
+        render_principal_editor(
+            script, asset, initial_cap, variables_unificadas=False
+        )
     with comparison_col:
         render_comparison_editor(comparison)
 
@@ -6906,8 +7205,8 @@ def request_editor_undo(script: str, editor_kind: str) -> None:
 SIDEBAR_GROUPS = (
     "📁 ESTRATEGIAS",
     "⚖️ ESTRATEGIAS A COMPARAR",
-    "⚙️ REGLAS COMUNES",
-    "🎛️ PARÁMETROS DE LA ESTRATEGIA",
+    "⚙️ CONFIGURACIÓN DE LAS PRUEBAS",
+    "🎛️ VARIABLES DE LA ESTRATEGIA",
     "📊 OPCIONES DE VISUALIZACIÓN",
     "💡 ESTADO DEL BACKTEST",
 )
@@ -7076,36 +7375,156 @@ with st.sidebar:
     else:
         info_estrategia = strategy_parser.analizar_fuente("", nombre=SIN_ESTRATEGIA_NOMBRE)
 
-    # --- 3. REGLAS COMUNES ----------------------------------------------
-    # G.3.6: los dos campos de este grupo salen del archivo de la Estrategia Principal.
-    # Si el archivo no declara el dato se usa el respaldo (TSLA / 100000) y, si la
-    # Principal cambia, ambos campos se vuelven a leer de la nueva estrategia.
+    # --- 3. CONFIGURACIÓN DE LAS PRUEBAS -------------------------------
     with st.expander(SIDEBAR_GROUPS[2], expanded=True, key="grp_reglas"):
         ticker_principal, _ = sincronizar_reglas_comunes(selected_script, info_estrategia)
+
         asset = st.selectbox(
-            "Activo / Ticker", opciones_activo_ui(ticker_principal), key=ACTIVO_KEY
-        )
-        initial_cap = st.number_input(
-            "Capital Inicial ($)", min_value=1.0, step=10000.0, key=CAPITAL_KEY
-        )
-        st.caption(
-            f"⤵ Reglas de `{strategy_filename(selected_script)}` "
-            f"(respaldo: {DEFAULT_TICKER} / ${DEFAULT_CAPITAL:,.0f})."
+            "Acción / Ticker",
+            opciones_activo_ui(ticker_principal),
+            key=ACTIVO_KEY,
+            help=(
+                "Activo principal que utilizará la estrategia en el backtest. "
+                "Ejemplo: TSLA para analizar operaciones sobre Tesla."
+            ),
         )
 
-    # Los parámetros editables aparecen junto a cada estrategia en sus paneles.
-    with st.expander(SIDEBAR_GROUPS[3], expanded=False, key="grp_parametros"):
-        st.caption("Los controles de parámetros están en el panel de cada estrategia.")
+        capital_col, _ = st.columns([1, 0.001])
+        with capital_col:
+            st.markdown("**Capital inicial ($)**")
+            st.caption("Importe con el que comienza la simulación.")
+            initial_cap = st.number_input(
+                "Capital inicial",
+                min_value=1.0,
+                step=1000.0,
+                format="%.2f",
+                key=CAPITAL_KEY,
+                label_visibility="collapsed",
+                help=(
+                    "Dinero inicial de la simulación. Ejemplo: 100000.00 "
+                    "representa cien mil dólares si los datos y resultados "
+                    "se expresan en USD."
+                ),
+            )
 
+        st.markdown("**Período del backtest**")
+        from datetime import date, timedelta
+        st.session_state.setdefault("prueba_fecha_inicio", date.today() - timedelta(days=365))
+        st.session_state.setdefault("prueba_fecha_fin", date.today())
+        fecha_inicio_col, fecha_fin_col = st.columns(2)
+
+        with fecha_inicio_col:
+            fecha_inicio = st.date_input(
+                "Fecha de inicio",
+                key="prueba_fecha_inicio",
+                on_change=_alinear_fecha_inicio,
+                help=(
+                    "Primer día del período que quieres analizar. "
+                    "Ejemplo: 2025/01/01 para comenzar el análisis en enero de 2025."
+                ),
+                format="YYYY/MM/DD",
+            )
+
+        with fecha_fin_col:
+            fecha_fin = st.date_input(
+                "Fecha de fin",
+                key="prueba_fecha_fin",
+                on_change=_alinear_fecha_fin,
+                help=(
+                    "Último día del período que quieres analizar. "
+                    "Ejemplo: 2026/10/19 para terminar el análisis en esa fecha."
+                ),
+                format="YYYY/MM/DD",
+            )
+
+        aviso_ajuste = st.session_state.pop(FECHAS_AJUSTADAS_KEY, None)
+        if aviso_ajuste:
+            st.caption("🗓️ " + aviso_ajuste)
+        if fecha_inicio > fecha_fin:
+            st.warning("La fecha de inicio debe ser anterior o igual a la fecha de fin.")
+        else:
+            dias_periodo = (fecha_fin - fecha_inicio).days + 1
+            st.caption(f"🗓️ Período seleccionado: {dias_periodo:,} días naturales")
+
+        comision_col, slippage_col = st.columns(2)
+
+        with comision_col:
+            st.number_input(
+                "Comisión (%)",
+                min_value=0.0,
+                value=0.05,
+                step=0.01,
+                format="%.3f",
+                key="prueba_comision_pct",
+                help=(
+                    "Costo porcentual estimado por operación. "
+                    "Ejemplo: 0.050 significa 0.05 %, es decir, "
+                    "aproximadamente $0.05 por cada $100 de importe operado."
+                ),
+            )
+
+        with slippage_col:
+            st.number_input(
+                "Slippage (%)",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                format="%.3f",
+                key="prueba_slippage_pct",
+                help=(
+                    "Deslizamiento estimado entre el precio esperado y el de ejecución. "
+                    "Ejemplo: 0.010 significa 0.01 %, aproximadamente $0.01 "
+                    "por cada $100 de importe de referencia."
+                ),
+            )
+
+        st.number_input(
+            "Leverage (apalancamiento)",
+            min_value=1.0,
+            value=1.0,
+            step=0.5,
+            format="%.2f",
+            key="prueba_leverage",
+            help=(
+                "Multiplicador de la exposición respecto al capital. "
+                "Ejemplo: 1.00× significa operar sin apalancamiento; "
+                "2.00× representa una exposición equivalente a dos veces el capital "
+                "y también aumenta las posibles pérdidas."
+            ),
+        )
+
+        tickers_disponibles = available_tickers()
+
+        st.multiselect(
+            "Universo / Instrumentos",
+            options=tickers_disponibles,
+            default=[asset] if asset in tickers_disponibles else [],
+            key="prueba_universo",
+            help=(
+                "Activos que quieres incluir en el análisis. "
+                "Ejemplo: TSLA y AAPL para seleccionar ambos instrumentos."
+            ),
+        )
+
+        st.selectbox(
+            "Benchmark",
+            options=tickers_disponibles,
+            index=tickers_disponibles.index("SPY") if "SPY" in tickers_disponibles else 0,
+            key="prueba_benchmark",
+            help=(
+                "Activo de referencia para comparar el rendimiento de la estrategia. "
+                "Ejemplo: SPY representa un fondo que sigue el índice S&P 500."
+            ),
+        )
     # --- 5. OPCIONES DE VISUALIZACIÓN -----------------------------------
     with st.expander(SIDEBAR_GROUPS[4], expanded=False, key="grp_visualizacion"):
-        show_equity = st.checkbox("Strategy Equity", value=True)
-        show_benchmark = st.checkbox("Benchmark Comparison", value=True)
-        show_drawdown = st.checkbox("Drawdown", value=True)
+        show_equity = st.checkbox("Curva de capital de la estrategia", value=True)
+        show_benchmark = st.checkbox("Comparación con el benchmark", value=True)
+        show_drawdown = st.checkbox("Caída desde el máximo (drawdown)", value=True)
 
     # --- 6. ESTADO DEL BACKTEST -----------------------------------------
     with st.expander(SIDEBAR_GROUPS[5], expanded=True, key="grp_estado"):
-        st.info("💡 **Backtest Status:** Likely Not Overfit\n\nParameters: 2 Determined")
+        st.info("💡 **Estado del backtest:** pendiente de validación\n\nParámetros detectados: 2")
 
 if st.session_state.get(EDITOR_NAVIGATION_KEY):
     render_editor_navigation_confirmation(ALL_STRATEGIES)
@@ -7542,24 +7961,6 @@ def render_laboratorio_inicial() -> None:
     Antes de ejecutar la plantilla las tarjetas muestran «—» y la gráfica un estado vacío:
     no se dibujan curvas planas ficticias ni se reutiliza el resultado de otra estrategia.
     """
-    st.markdown(
-        """
-<div class="lab-welcome">
-    <div class="lab-welcome-title">Bienvenido al Laboratorio de Estrategias</div>
-    <div class="lab-welcome-desc">Aquí puedes probar, analizar y optimizar estrategias de
-        trading con datos históricos. Esta es una plantilla funcional que puedes modificar.
-        Ejecuta un backtest para revisar sus resultados o guárdala como un archivo nuevo.</div>
-    <div class="lab-steps">
-        <span class="lab-step"><b>1</b> Edita o pega el código Python</span>
-        <span class="lab-step"><b>2</b> Configura el activo y los parámetros</span>
-        <span class="lab-step"><b>3</b> Ejecuta el backtest y revisa los resultados</span>
-        <span class="lab-step"><b>4</b> Optimiza o guarda tu estrategia</span>
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
     if metrics.get("standby"):
         st.info(
             "💤 **Backtest en espera: selecciona una estrategia.** Abre una estrategia "
@@ -7568,16 +7969,24 @@ def render_laboratorio_inicial() -> None:
         )
     render_lab_context_bar()
 
+    error_fechas = _error_fechas_prueba()
+    if error_fechas:
+        st.warning(
+            f"{error_fechas} El backtest no se ejecutará hasta corregir el período; "
+            "los resultados anteriores y el código del editor se conservan."
+        )
+
     hay_resultado = not metrics.get("standby") and not metrics.get("error")
     sim_curvas = simulaciones_curvas("")
     hay_grafica = hay_resultado or bool(sim_curvas)
 
     if hay_resultado and plantilla_resultado_desactualizado(asset, initial_cap):
-        st.info(
-            "Los resultados mostrados corresponden a una ejecución anterior: cambiaste el "
-            "activo, el capital, un parámetro o el código. Pulsa «▶ Ejecutar Backtest» "
-            "para actualizarlos. Las pruebas registradas se conservan."
-        )
+        with st.container(key="backtest-stale-notice"):
+            st.info(
+                "Los resultados mostrados corresponden a una ejecución anterior: cambiaste el "
+                "activo, el capital, un parámetro o el código. Pulsa «▶ Ejecutar Backtest» "
+                "para actualizarlos. Las pruebas registradas se conservan."
+            )
 
     if hay_resultado:
         equity_value = float(metrics["equity"])
@@ -7599,7 +8008,7 @@ def render_laboratorio_inicial() -> None:
         kpi_equity = kpi_return = kpi_drawdown = kpi_win = kpi_sharpe = "—"
         tone_equity = tone_return = tone_drawdown = tone_win = tone_sharpe = ""
 
-    left_col, right_col = st.columns([1.05, 1], gap="large")
+    left_col, right_col = render_panel_a()
     with left_col:
         render_plantilla_inicial_editor(asset, initial_cap)
 
@@ -7729,10 +8138,13 @@ def render_laboratorio_center() -> None:
     # una comparativa cargada (aunque no haya Principal) se conserva la vista de siempre.
     comparison_script = (st.session_state.get(COMPARE_KEY) or [None])[0]
     if not selected_script and not comparison_script:
+        st.markdown(
+            '<div class="panel-a-active-marker"></div>',
+            unsafe_allow_html=True,
+        )
         render_laboratorio_inicial()
         return
 
-    render_editor_panels(selected_script, asset, initial_cap)
 
     if st.session_state.get(BACKTEST_PENDING_KEY) == selected_script:
         st.info(
@@ -7741,196 +8153,226 @@ def render_laboratorio_center() -> None:
         )
 
     # Mostrar aviso si los resultados mostrados corresponden a una configuración anterior
+    if _error_fechas_prueba():
+        st.warning(
+            f"{_error_fechas_prueba()} El backtest no se ejecutará hasta corregir el "
+            "período; los resultados anteriores y el código del editor se conservan."
+        )
     if st.session_state.get(RESULT_STALE_KEY):
         st.info("Los resultados mostrados corresponden a una configuración anterior. Pulsa «▶ Ejecutar Backtest» para actualizarlos.")
 
     render_lab_context_bar()
-    with st.expander("Información técnica", expanded=False):
-        st.caption(f"Identificador interno del motor · {ENGINE_VERSION}")
 
-    # -----------------------------------------------------------------------------
-    # 2. BARRA SUPERIOR DE METRICAS (KPIs)
-    # -----------------------------------------------------------------------------
-    equity_value = auto("equity")
-    total_return_value = auto("total_return")
-    drawdown_value = auto("max_drawdown")
-    win_rate_value = auto("win_rate")
-    sharpe_value = auto("sharpe")
-    standby = bool(metrics.get("standby"))
-    # Estado vacío de Fase 1: sin Estrategia Principal y sin ejecutar todavía. Con una
-    # Principal cargada el laboratorio conserva su comportamiento de siempre (aunque el
-    # backtest esté pendiente de confirmación).
-    plantilla_vacia = (not selected_script) and standby
-
-    if plantilla_vacia:
-        kpi_equity = kpi_return = kpi_drawdown = kpi_win = kpi_sharpe = "—"
-        tone_equity = tone_return = tone_drawdown = tone_win = tone_sharpe = ""
-    else:
-        kpi_equity = f"${equity_value:,.2f}"
-        kpi_return = f"{total_return_value:.2f}%"
-        kpi_drawdown = f"{drawdown_value:.2f}%"
-        kpi_win = f"{win_rate_value:.1f}%"
-        kpi_sharpe = f"{sharpe_value:.2f}"
-        tone_equity = "positive" if equity_value >= initial_cap else "negative"
-        tone_return = "positive" if total_return_value >= 0 else "negative"
-        tone_drawdown = "negative" if drawdown_value < 0 else "positive"
-        tone_win = "positive" if win_rate_value >= 0 else "negative"
-        tone_sharpe = "positive" if sharpe_value >= 0 else "negative"
-
-    st.markdown(
-        f"""
-    <div class="kpi-container">
-        <div class="kpi-card"><div class="kpi-label">Capital Final</div>
-            <div class="kpi-value {tone_equity}">{kpi_equity}</div></div>
-        <div class="kpi-card"><div class="kpi-label">Retorno Total</div>
-            <div class="kpi-value {tone_return}">{kpi_return}</div></div>
-        <div class="kpi-card"><div class="kpi-label">Max Drawdown</div>
-            <div class="kpi-value {tone_drawdown}">{kpi_drawdown}</div></div>
-        <div class="kpi-card"><div class="kpi-label">Win Rate</div>
-            <div class="kpi-value {tone_win}">{kpi_win}</div></div>
-        <div class="kpi-card"><div class="kpi-label">Sharpe Ratio</div>
-            <div class="kpi-value {tone_sharpe}">{kpi_sharpe}</div></div>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
-    # --- COMPARATIVE CHART, BELOW BOTH EDITORS ---
-    chart_head, view_col = st.columns([3.2, 1], vertical_alignment="center", gap="small")
-    with chart_head:
+    # Panel A: misma distribución para la estrategia principal; la comparativa
+    # conserva su distribución de dos editores y resultados debajo.
+    panel_a_active = bool(selected_script and not comparison_script)
+    if panel_a_active:
         st.markdown(
-            f'<div class="panel-title">📈 Principal vs Comparativas · Benchmark ({asset})</div>',
+            '<div class="panel-a-active-marker"></div>',
             unsafe_allow_html=True,
         )
-    with view_col:
-        chart_view = st.segmented_control(
-            "Vista del patrimonio:",
-            EQUITY_VIEWS,
-            default=st.session_state.get(CHART_VIEW_KEY, "$"),
-            key=f"{CHART_VIEW_KEY}_widget",
-            label_visibility="collapsed",
-            help="Alterna entre dólares, retorno acumulado, base 100 y escala logarítmica.",
-        ) or st.session_state.get(CHART_VIEW_KEY, "$")
-    st.session_state[CHART_VIEW_KEY] = chart_view
-
-    draft_metrics, draft_equity = read_draft_curve(st.session_state)
-
-    # Las comparativas se ejecutan con los parámetros guardados en su panel.
-    backtest_pending = (
-        st.session_state.get(BACKTEST_PENDING_KEY) == selected_script
-    )
-    compare_scripts = (
-        []
-        if backtest_pending
-        else [
-            s for s in st.session_state.get(COMPARE_KEY, [])
-            if s != selected_script
-        ]
-    )
-    compare_results = (
-        get_comparative_results(
-            compare_scripts, asset, initial_cap, force=force_run
-        )
-        if compare_scripts
-        else {}
-    )
-
-    comparative_curves = []
-    stale_comparatives = st.session_state.get(COMPARE_STALE_KEY) or set()
-    for script in compare_scripts[:MAX_COMPARATIVES]:
-        payload = compare_results.get(script) or {}
-        curve_df, curve_metrics = payload.get("df"), payload.get("metrics") or {}
-        comparative_curves.append({
-            "name": strategy_filename(script),
-            "script": script,
-            "equity": curve_df["Equity"] if curve_df is not None else pd.Series(dtype=float),
-            "metrics": curve_metrics,
-        })
-    if stale_comparatives:
-        st.caption("Resultados comparativos de una configuración anterior.")
-
-    fig = build_equity_figure(
-        df_res,
-        asset,
-        selected_script,
-        show_equity and not plantilla_vacia,
-        show_benchmark and not plantilla_vacia,
-        show_drawdown and not plantilla_vacia,
-        draft_metrics,
-        draft_equity,
-        comparative_curves,
-        chart_view,
-    )
-    if plantilla_vacia and not comparative_curves:
-        fig.add_annotation(
-            text="Aún no hay resultados",
-            showarrow=False,
-            xref="paper",
-            yref="paper",
-            x=0.5,
-            y=0.5,
-            font=dict(size=16, color="#94a3b8"),
-        )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
-    )
-
-    comparativas_ok = [c for c in comparative_curves if not c["metrics"].get("error")]
-    if comparativas_ok:
-        st.caption(
-            "🔵 Principal ⭐ · 🟠/🟢 comparativas marcadas con [x] · "
-            "⚪ Benchmark · 🟣 borrador de IA (si está en prueba)"
-        )
-    for item in comparative_curves:
-        if item["metrics"].get("error"):
-            st.error(
-                f"❌ `{strategy_display_name(item['script'])}`: "
-                f"{item['metrics']['error']}"
-            )
-    if draft_equity is not None and draft_metrics:
-        st.caption(
-            f"🧪 Curva violeta punteada = borrador de IA en prueba "
-            f"(Capital Final ${draft_metrics['equity']:,.2f})."
-        )
-
-    # El panel analiza exactamente las mismas métricas que muestra la barra de KPIs
-    values = display_metrics()
-
-
-    # -----------------------------------------------------------------------------
-    # 3b. TABLA COMPARATIVA DE MÉTRICAS (Principal vs Comparativas vs Benchmark)
-    # -----------------------------------------------------------------------------
-    st.markdown(
-        '<div class="panel-title" style="margin-top:10px">📊 Tabla Comparativa de Métricas</div>',
-        unsafe_allow_html=True,
-    )
-    if plantilla_vacia and not comparative_curves:
-        st.caption(
-            "Sin resultados todavía: pulsa «▶ Ejecutar Backtest» en la plantilla para "
-            "completar la tabla de métricas."
-        )
+        left_col, right_col = render_panel_a()
+        with left_col:
+            render_editor_panels(selected_script, asset, initial_cap)
     else:
-        tabla_comparativa = build_comparison_table(values, comparative_curves, asset)
-        st.dataframe(
-            tabla_comparativa,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Estrategia": st.column_config.TextColumn(width="medium"),
-                "Retorno %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Vs Principal": st.column_config.NumberColumn(format="%+.2f pts", help="Diferencia en puntos porcentuales contra la principal"),
-                "Sharpe": st.column_config.NumberColumn(format="%.2f"),
-                "Max Drawdown %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Comisiones $": st.column_config.NumberColumn(format="$%.2f", help="Comisión estimada (0.05 % del capital por fill)"),
-                "Fills": st.column_config.NumberColumn(format="%d", help="Cambios de exposición: entradas y salidas"),
-                "Error": st.column_config.TextColumn(width="medium"),
-            },
+        right_col = None
+        render_editor_panels(selected_script, asset, initial_cap)
+    with (right_col if panel_a_active else nullcontext()):
+        with st.expander("Información técnica", expanded=False):
+            st.caption(f"Identificador interno del motor · {ENGINE_VERSION}")
+
+        # -----------------------------------------------------------------------------
+        # 2. BARRA SUPERIOR DE METRICAS (KPIs)
+        # -----------------------------------------------------------------------------
+        equity_value = auto("equity")
+        total_return_value = auto("total_return")
+        drawdown_value = auto("max_drawdown")
+        win_rate_value = auto("win_rate")
+        sharpe_value = auto("sharpe")
+        standby = bool(metrics.get("standby"))
+        # Estado vacío de Fase 1: sin Estrategia Principal y sin ejecutar todavía. Con una
+        # Principal cargada el laboratorio conserva su comportamiento de siempre (aunque el
+        # backtest esté pendiente de confirmación).
+        plantilla_vacia = (not selected_script) and standby
+
+        if plantilla_vacia:
+            kpi_equity = kpi_return = kpi_drawdown = kpi_win = kpi_sharpe = "—"
+            tone_equity = tone_return = tone_drawdown = tone_win = tone_sharpe = ""
+        else:
+            kpi_equity = f"${equity_value:,.2f}"
+            kpi_return = f"{total_return_value:.2f}%"
+            kpi_drawdown = f"{drawdown_value:.2f}%"
+            kpi_win = f"{win_rate_value:.1f}%"
+            kpi_sharpe = f"{sharpe_value:.2f}"
+            tone_equity = "positive" if equity_value >= initial_cap else "negative"
+            tone_return = "positive" if total_return_value >= 0 else "negative"
+            tone_drawdown = "negative" if drawdown_value < 0 else "positive"
+            tone_win = "positive" if win_rate_value >= 0 else "negative"
+            tone_sharpe = "positive" if sharpe_value >= 0 else "negative"
+
+        st.markdown(
+            f"""
+        <div class="kpi-container">
+            <div class="kpi-card"><div class="kpi-label">Capital Final</div>
+                <div class="kpi-value {tone_equity}">{kpi_equity}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Retorno Total</div>
+                <div class="kpi-value {tone_return}">{kpi_return}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Max Drawdown</div>
+                <div class="kpi-value {tone_drawdown}">{kpi_drawdown}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Win Rate</div>
+                <div class="kpi-value {tone_win}">{kpi_win}</div></div>
+            <div class="kpi-card"><div class="kpi-label">Sharpe Ratio</div>
+                <div class="kpi-value {tone_sharpe}">{kpi_sharpe}</div></div>
+        </div>
+        """,
+            unsafe_allow_html=True,
         )
 
-    # -----------------------------------------------------------------------------
+        # --- COMPARATIVE CHART, BELOW BOTH EDITORS ---
+        chart_head, view_col = st.columns([3.2, 1], vertical_alignment="center", gap="small")
+        with chart_head:
+            st.markdown(
+                f'<div class="panel-title">📈 Principal vs Comparativas · Benchmark ({asset})</div>',
+                unsafe_allow_html=True,
+            )
+        with view_col:
+            chart_view = st.segmented_control(
+                "Vista del patrimonio:",
+                EQUITY_VIEWS,
+                default=st.session_state.get(CHART_VIEW_KEY, "$"),
+                key=f"{CHART_VIEW_KEY}_widget",
+                label_visibility="collapsed",
+                help="Alterna entre dólares, retorno acumulado, base 100 y escala logarítmica.",
+            ) or st.session_state.get(CHART_VIEW_KEY, "$")
+        st.session_state[CHART_VIEW_KEY] = chart_view
+
+        draft_metrics, draft_equity = read_draft_curve(st.session_state)
+
+        # Las comparativas se ejecutan con los parámetros guardados en su panel.
+        backtest_pending = (
+            st.session_state.get(BACKTEST_PENDING_KEY) == selected_script
+        )
+        compare_scripts = (
+            []
+            if backtest_pending
+            else [
+                s for s in st.session_state.get(COMPARE_KEY, [])
+                if s != selected_script
+            ]
+        )
+        compare_results = (
+            get_comparative_results(
+                compare_scripts, asset, initial_cap, force=force_run
+            )
+            if compare_scripts
+            else {}
+        )
+
+        comparative_curves = []
+        stale_comparatives = st.session_state.get(COMPARE_STALE_KEY) or set()
+        for script in compare_scripts[:MAX_COMPARATIVES]:
+            payload = compare_results.get(script) or {}
+            curve_df, curve_metrics = payload.get("df"), payload.get("metrics") or {}
+            comparative_curves.append({
+                "name": strategy_filename(script),
+                "script": script,
+                "equity": curve_df["Equity"] if curve_df is not None else pd.Series(dtype=float),
+                "metrics": curve_metrics,
+            })
+        if stale_comparatives:
+            st.caption("Resultados comparativos de una configuración anterior.")
+
+        sim_curvas_principal = (
+            simulaciones_curvas(selected_script) if panel_a_active else []
+        )
+        curvas_grafica = [*comparative_curves, *sim_curvas_principal]
+        fig = build_equity_figure(
+            df_res,
+            asset,
+            selected_script,
+            show_equity and not plantilla_vacia,
+            show_benchmark and not plantilla_vacia,
+            show_drawdown and not plantilla_vacia,
+            draft_metrics,
+            draft_equity,
+            curvas_grafica,
+            chart_view,
+        )
+        if plantilla_vacia and not comparative_curves:
+            fig.add_annotation(
+                text="Aún no hay resultados",
+                showarrow=False,
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.5,
+                font=dict(size=16, color="#94a3b8"),
+            )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+        )
+        if sim_curvas_principal:
+            st.caption(
+                "Curvas de las pruebas registradas con «Simular»: "
+                + " · ".join(curva["name"] for curva in sim_curvas_principal)
+            )
+
+        comparativas_ok = [c for c in comparative_curves if c["metrics"].get("error")]
+        if comparativas_ok:
+            st.caption(
+                "🔵 Principal ⭐ · 🟠/🟢 comparativas marcadas con [x] · "
+                "⚪ Benchmark · 🟣 borrador de IA (si está en prueba)"
+            )
+        for item in comparative_curves:
+            if item["metrics"].get("error"):
+                st.error(
+                    f"❌ `{strategy_display_name(item['script'])}`: "
+                    f"{item['metrics']['error']}"
+                )
+        if draft_equity is not None and draft_metrics:
+            st.caption(
+                f"🧪 Curva violeta punteada = borrador de IA en prueba "
+                f"(Capital Final ${draft_metrics['equity']:,.2f})."
+            )
+
+        # El panel analiza exactamente las mismas métricas que muestra la barra de KPIs
+        values = display_metrics()
+
+
+        # -----------------------------------------------------------------------------
+        # 3b. TABLA COMPARATIVA DE MÉTRICAS (Principal vs Comparativas vs Benchmark)
+        # -----------------------------------------------------------------------------
+        st.markdown(
+            '<div class="panel-title" style="margin-top:10px">📊 Tabla Comparativa de Métricas</div>',
+            unsafe_allow_html=True,
+        )
+        if plantilla_vacia and not comparative_curves:
+            st.caption(
+                "Sin resultados todavía: pulsa «▶ Ejecutar Backtest» en la plantilla para "
+                "completar la tabla de métricas."
+            )
+        else:
+            tabla_comparativa = build_comparison_table(values, comparative_curves, asset)
+            st.dataframe(
+                tabla_comparativa,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Estrategia": st.column_config.TextColumn(width="medium"),
+                    "Retorno %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Vs Principal": st.column_config.NumberColumn(format="%+.2f pts", help="Diferencia en puntos porcentuales contra la principal"),
+                    "Sharpe": st.column_config.NumberColumn(format="%.2f"),
+                    "Max Drawdown %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Comisiones $": st.column_config.NumberColumn(format="$%.2f", help="Comisión estimada (0.05 % del capital por fill)"),
+                    "Fills": st.column_config.NumberColumn(format="%d", help="Cambios de exposición: entradas y salidas"),
+                    "Error": st.column_config.TextColumn(width="medium"),
+                },
+            )
+
+        # -----------------------------------------------------------------------------
     # 4. TERMINAL Y LOGS INFERIOR
     # -----------------------------------------------------------------------------
     st.markdown(
